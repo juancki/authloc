@@ -3,6 +3,8 @@ package main
 import (
     "os"
     "database/sql"
+    "encoding/json"
+    "encoding/base64"
     "fmt"
     "log"
     "time"
@@ -11,11 +13,12 @@ import (
     "strconv"
     "strings"
     "sync"
-
+    // Third party libs
     "github.com/go-redis/redis/v7"
     "github.com/gorilla/handlers"
     "github.com/gorilla/mux"
     _ "github.com/lib/pq"
+    "golang.org/x/crypto/bcrypt"
 )
 
 
@@ -23,11 +26,40 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
     fmt.Fprintf(w,"Hello, World Home page")
 }
 
-func Authloc(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintf(w,"Auth location")
+
+type Authloc struct{
+    /* Attributes are req to be
+    capitalized to decode on JSON*/
+    Name string
+    Pass string
+    Loc string
+    tocken string
+}
+func string2base64(s string) string {
+    return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
-func WriteMsg(w http.ResponseWriter, r *http.Request) {
+func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
+    // check user password from request
+    log.Printf("Body: %+v",r.Body)
+    var body Authloc
+    err := json.NewDecoder(r.Body).Decode(&body)
+    if err != nil{
+        w.WriteHeader(http.StatusBadRequest)
+        w.Write(([]byte)("Expected json format"))
+        return
+    }
+    raw := fmt.Sprintf("%s:%s:%s",body.Name,body.Pass,body.Loc)
+    hashed, _ :=bcrypt.GenerateFromPassword([]byte(raw),bcrypt.MinCost)
+    body.tocken = string(hashed)
+    value := fmt.Sprintf("%s:%s:", string2base64(body.Name),string2base64(body.Loc))
+    rclient.Lock()
+    rclient.redis.Set(body.tocken,value,time.Hour*2) // TODO: make it come from config.
+    rclient.Unlock()
+    log.Printf("Body: %+v",body)
+}
+
+func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     fmt.Fprintf(w,"Hello, World page")
 }
 
@@ -117,9 +149,6 @@ func main(){
     for pclient == nil{
         pclient = NewPostgre(*postgre)
     }
-    result,err := pclient.pg.Query("SELECT * FROM mytable")
-    log.Print(err)
-    log.Print(result)
     defer pclient.pg.Close()
     // Set up redis
     rclient = nil
@@ -136,8 +165,8 @@ func main(){
 
 
     router.HandleFunc("/", HomeHandler)
-    router.HandleFunc("/auth", Authloc)
-    router.HandleFunc("/writemsg", WriteMsg)
+    router.HandleFunc("/auth", AuthlocHandler)
+    router.HandleFunc("/writemsg", WriteMsgHandler)
     loggedRouter := handlers.LoggingHandler(os.Stdout, router)
 
 
