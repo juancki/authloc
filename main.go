@@ -1,24 +1,27 @@
 
 package main
 import (
-    "os"
-    "database/sql"
-    "encoding/json"
-    "encoding/base64"
-    "fmt"
-    "log"
-    "time"
-    "net/http"
-    "flag"
-    "strconv"
-    "strings"
-    "sync"
-    // Third party libs
-    "github.com/go-redis/redis/v7"
-    "github.com/gorilla/handlers"
-    "github.com/gorilla/mux"
-    _ "github.com/lib/pq"
-    "golang.org/x/crypto/bcrypt"
+	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+        "errors"
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	// Third party libs
+	"github.com/go-redis/redis/v7"
+	"github.com/gorilla/handlers"
+	"github.com/gorilla/mux"
+	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
 
@@ -27,13 +30,20 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
+const (
+    WORLD= "world"
+)
+
+type UUIDTYPE uint64
+
+
 type Authloc struct{
     /* Attributes are req to be
     capitalized to decode on JSON*/
     Name string
     Pass string
     Loc string
-    tocken string
+    token string
 }
 func string2base64(s string) string {
     return base64.StdEncoding.EncodeToString([]byte(s))
@@ -41,26 +51,111 @@ func string2base64(s string) string {
 
 func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
     // check user password from request
-    log.Printf("Body: %+v",r.Body)
     var body Authloc
     err := json.NewDecoder(r.Body).Decode(&body)
     if err != nil{
         w.WriteHeader(http.StatusBadRequest)
-        w.Write(([]byte)("Expected json format"))
+        w.Write(([]byte)("Expected json format with keys: Name, Pass, Loc. All strings."))
         return
     }
     raw := fmt.Sprintf("%s:%s:%s",body.Name,body.Pass,body.Loc)
     hashed, _ :=bcrypt.GenerateFromPassword([]byte(raw),bcrypt.MinCost)
-    body.tocken = string(hashed)
-    value := fmt.Sprintf("%s:%s:", string2base64(body.Name),string2base64(body.Loc))
+    body.token = string(hashed) // TODO reduce token size to decrease impact in mem
+    value := fmt.Sprintf("%s:%s:%s:",string2base64(body.Loc),string2base64(body.Name),"timeFormated") // TODO fix time formatting
     rclient.Lock()
-    rclient.redis.Set(body.tocken,value,time.Hour*2) // TODO: make it come from config.
+    result := rclient.redis.Set(body.token,value,time.Hour*2) // TODO: make it come from config.
     rclient.Unlock()
-    log.Printf("Body: %+v",body)
+    if result.Err() != nil{
+        w.WriteHeader(http.StatusInternalServerError)
+        w.Write([]byte ("Please retry in a few seconds"))
+    }
+    fmt.Fprintf(w,"{\"Token\":\"%s\"}",body.token) // Json formated
+}
+
+
+func base64_2_uuid(str string) (UUIDTYPE,error){
+    bts,err := base64.StdEncoding.DecodeString(str)
+    if err != nil{
+        return 0, err
+    }
+    result, l :=  binary.Uvarint(bts)
+
+    if l == 0{
+        return 0, errors.New("Unable to cast fronm base64 to uuid in base64_2_uuid")
+    }
+    return UUIDTYPE(result),nil
+}
+
+
+func QueryNearNeighbourhs (cuuid string )([]UUIDTYPE,error){
+    query := redis.GeoRadiusQuery{}
+    query.Radius =  10
+    query.Unit = "km"
+    rgeoclient.Lock()
+    query_out := rgeoclient.redis.GeoRadiusByMember(WORLD,cuuid,&query)
+    rgeoclient.Unlock()
+    log.Println("query_out: ",query_out)
+    if query_out.Err() != nil{
+        return nil,query_out.Err()
+    }
+
+    geoquery,_ := query_out.Result()
+    cuuids :=  make([]UUIDTYPE,len(geoquery))
+    for index, geoloc := range geoquery{
+        cid, err := base64_2_uuid(geoloc.Name)
+        cuuids[index] = cid
+        if err != nil{
+            return nil,err
+        }
+    }
+    return cuuids, nil
+}
+
+
+func verifyAuth(Token string, cuuid string){
+    // TODO
+}
+
+type WriteMsg struct {
+    Token string
+    Message string
+    // CUUID string
 }
 
 func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintf(w,"Hello, World page")
+    var incoming WriteMsg
+    decoder := json.NewDecoder(r.Body)
+    decoder.DisallowUnknownFields()
+    err := decoder.Decode(&incoming)
+    log.Print(incoming)
+    if err != nil{
+        w.WriteHeader(http.StatusBadRequest)
+        w.Write(([]byte)("Expected json format with a keys: Token, Message. All strings."))
+        return
+    }
+    rclient.Lock()
+    tokenlookup := rclient.redis.Get(incoming.Token)
+    rclient.Unlock()
+    if tokenlookup.Err() != nil {
+        // Token not found in our token DB.
+        log.Print(tokenlookup.Err())
+        w.WriteHeader(http.StatusForbidden)
+        w.Write([]byte ("Invalid token."))
+        return
+    }
+    res, err := tokenlookup.Result()
+    cuuid := strings.Split(res,":")[3]
+    // TODO Handle this error: Query broken: Bad connection or sth.
+    ids, err := QueryNearNeighbourhs(cuuid)
+    log.Printf("cuuid: %s\n\tcuuids: %+v\n\rerr: %s",cuuid, ids, err)
+    if err != nil{
+        log.Print(err)
+        w.WriteHeader(http.StatusInternalServerError)
+        w.Write([]byte ("Please retry in a few seconds"))
+        return
+    }
+
+    log.Print(cuuid)
 }
 
 type Redis struct{
@@ -133,11 +228,13 @@ func NewPostgre(connURL string) *Postgre{
 }
 
 var rclient *Redis
+var rgeoclient *Redis
 var pclient *Postgre
 
 func main(){
     port := flag.String("port", "localhost:8000", "port to connect (server)")
     redis:= flag.String("redis", "@localhost:6379/0", "format password@IPAddr:port")
+    redisGeo := flag.String("redisGeo", "@localhost:6379/1", "format password@IPAddr:port")
     postgre := flag.String("postgre", "authloc:Authloc2846@localhost:5432/postgis_db", "user:password@IPAddr:port/dbname")
     flag.Parse()
     fport := *port
@@ -156,6 +253,15 @@ func main(){
         rclient = NewRedis(*redis)
         time.Sleep(time.Second*1)
     }
+    rgeoclient = nil
+    for rgeoclient == nil{
+        rgeoclient  = NewRedis(*redisGeo)
+        time.Sleep(time.Second*1)
+    }
+    fmt.Println(rgeoclient.redis.Conn())
+    fmt.Println(rclient.redis.Conn())
+
+
     // Starting server
     fmt.Println("Starting authlo c...") // ,*frontport,"for front, ",*backport," for back")
     fmt.Println("--------------------------------------------------------------- ")
