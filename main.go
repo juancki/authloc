@@ -18,6 +18,10 @@ import (
 
 	// Third party libs
 	"github.com/go-redis/redis/v7"
+	pb "../wsholder/pb"
+	cPool "../wsholder/connectionPool"
+	"github.com/golang/protobuf/proto"
+	"google.golang.org/grpc"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
@@ -34,7 +38,6 @@ const (
     WORLD= "world"
 )
 
-type UUIDTYPE uint64
 
 
 type Authloc struct{
@@ -73,21 +76,9 @@ func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func base64_2_uuid(str string) (UUIDTYPE,error){
-    bts,err := base64.StdEncoding.DecodeString(str)
-    if err != nil{
-        return 0, err
-    }
-    result, l :=  binary.Uvarint(bts)
-
-    if l == 0{
-        return 0, errors.New("Unable to cast fronm base64 to uuid in base64_2_uuid")
-    }
-    return UUIDTYPE(result),nil
-}
 
 
-func QueryNearNeighbourhs (cuuid string )([]UUIDTYPE,error){
+func QueryNearNeighbourhs (cuuid string )([]cPool.Uuid,error){
     query := redis.GeoRadiusQuery{}
     query.Radius =  10
     query.Unit = "km"
@@ -100,9 +91,9 @@ func QueryNearNeighbourhs (cuuid string )([]UUIDTYPE,error){
     }
 
     geoquery,_ := query_out.Result()
-    cuuids :=  make([]UUIDTYPE,len(geoquery))
+    cuuids :=  make([]cPool.Uuid,len(geoquery))
     for index, geoloc := range geoquery{
-        cid, err := base64_2_uuid(geoloc.Name)
+        cid, err := cPool.Base64_2_uuid(geoloc.Name)
         cuuids[index] = cid
         if err != nil{
             return nil,err
@@ -154,6 +145,8 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         w.Write([]byte ("Please retry in a few seconds"))
         return
     }
+    var repMsg pb.ReplicationMsg
+    repMsg.CUuids = ids
 
     log.Print(cuuid)
 }
@@ -173,7 +166,7 @@ type Postgre struct{
 func NewRedis(connURL string) *Redis{
     // redis://password@netloc:port/dbnum
     // redis does not have a username
-    key := "postgresql://"
+    key := "redis://"
     if strings.HasPrefix(connURL,key){
         connURL = connURL[len(key):]
     }
