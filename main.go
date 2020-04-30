@@ -3,9 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
-        "errors"
 	"flag"
 	"fmt"
 	"log"
@@ -18,14 +16,14 @@ import (
 
 	// Third party libs
 	"github.com/go-redis/redis/v7"
-	pb "../wsholder/pb"
-	cPool "../wsholder/connectionPool"
-	"github.com/golang/protobuf/proto"
-	"google.golang.org/grpc"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	cPool "github.com/juancki/wsholder/connectionPool"
+	pb "github.com/juancki/wsholder/pb"
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/net/context"
+	"google.golang.org/grpc"
 )
 
 
@@ -140,15 +138,46 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     ids, err := QueryNearNeighbourhs(cuuid)
     log.Printf("cuuid: %s\n\tcuuids: %+v\n\rerr: %s",cuuid, ids, err)
     if err != nil{
+        log.Print("Error 111")
         log.Print(err)
-        w.WriteHeader(http.StatusInternalServerError)
-        w.Write([]byte ("Please retry in a few seconds"))
+        send500error(w)
         return
     }
     var repMsg pb.ReplicationMsg
     repMsg.CUuids = ids
+    repMsg.Msg = []byte (incoming.Message)
+    repMsg.MsgMime["Content-type"] = "text"
+    conn, err := grpc.Dial("localhost:8090")
+    defer conn.Close()
+    if err != nil{
+        log.Print("Error 112")
+        log.Print(err)
+        send500error(w)
+        return
+    }
+    c := pb.NewWsBackClient(conn)
+    ctx, cancel := context.WithTimeout(context.Background(),30*time.Second)
+    defer cancel()
+    repCall, err := c.Replicate(ctx)
+    if err != nil{
+        log.Print("Error 113")
+        log.Print(err)
+        send500error(w)
+        return
+    }
+    err = repCall.Send(&repMsg)
+    if err != nil{
+        log.Print("Error 114")
+        log.Print(err)
+        send500error(w)
+        return
+    }
+    log.Print("Send message successfully")
+}
 
-    log.Print(cuuid)
+func send500error(w http.ResponseWriter){
+        w.WriteHeader(http.StatusInternalServerError)
+        w.Write( []byte("Please retry in a few seoncds."))
 }
 
 type Redis struct{
