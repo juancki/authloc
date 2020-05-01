@@ -26,6 +26,14 @@ import (
 	"google.golang.org/grpc"
 )
 
+// Config
+// TODO add config for the grpc server
+
+// TODO How to develop on both projects at the same time (removing go mod ¿?)
+
+// FEATURES
+// TODO gorutine for the gcrp connection to the client
+// TODO clean the logging
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
     fmt.Fprintf(w,"Hello, World Home page")
@@ -67,8 +75,10 @@ func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
     result := rclient.redis.Set(body.token,value,time.Hour*2) // TODO: make it come from config.
     rclient.Unlock()
     if result.Err() != nil{
-        w.WriteHeader(http.StatusInternalServerError)
-        w.Write([]byte ("Please retry in a few seconds"))
+        log.Println("Error 101")
+        log.Println(err)
+        send500error(w)
+        return
     }
     fmt.Fprintf(w,"{\"Token\":\"%s\"}",body.token) // Json formated
 }
@@ -83,8 +93,8 @@ func QueryNearNeighbourhs (cuuid string )([]cPool.Uuid,error){
     rgeoclient.Lock()
     query_out := rgeoclient.redis.GeoRadiusByMember(WORLD,cuuid,&query)
     rgeoclient.Unlock()
-    log.Println("query_out: ",query_out)
     if query_out.Err() != nil{
+        log.Println("query_out: ",query_out)
         return nil,query_out.Err()
     }
 
@@ -92,10 +102,10 @@ func QueryNearNeighbourhs (cuuid string )([]cPool.Uuid,error){
     cuuids :=  make([]cPool.Uuid,len(geoquery))
     for index, geoloc := range geoquery{
         cid, err := cPool.Base64_2_uuid(geoloc.Name)
-        cuuids[index] = cid
         if err != nil{
             return nil,err
         }
+        cuuids[index] = cid
     }
     return cuuids, nil
 }
@@ -133,21 +143,33 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     res, err := tokenlookup.Result()
-    cuuid := strings.Split(res,":")[3]
+    splits := strings.Split(res,":")
+    if len(splits) <4 {
+        // The cuuid is the last position of the 
+        // redis entry starting from the 4th position element [3].
+        // Basically, client needs to connect first to wsholder to 
+        // to send a message.
+        w.WriteHeader(http.StatusForbidden)
+        w.Write([]byte("To send a message is req to be connected to the feed."))
+        return
+    }
+    cuuid := splits[len(splits)-1]
     // TODO Handle this error: Query broken: Bad connection or sth.
     ids, err := QueryNearNeighbourhs(cuuid)
-    log.Printf("cuuid: %s\n\tcuuids: %+v\n\rerr: %s",cuuid, ids, err)
     if err != nil{
+        log.Printf("\tcuuid: %s\n\t\t\t|cuuids: %+v\n\t\t\t+err: %s",cuuid, ids, err)
         log.Print("Error 111")
         log.Print(err)
         send500error(w)
         return
     }
-    var repMsg pb.ReplicationMsg
+    log.Print(ids)
+    repMsg := new(pb.ReplicationMsg)
     repMsg.CUuids = ids
     repMsg.Msg = []byte (incoming.Message)
+    repMsg.MsgMime = make(map[string]string)
     repMsg.MsgMime["Content-type"] = "text"
-    conn, err := grpc.Dial("localhost:8090")
+    conn, err := grpc.Dial("localhost:8090",grpc.WithInsecure())
     defer conn.Close()
     if err != nil{
         log.Print("Error 112")
@@ -165,7 +187,7 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         send500error(w)
         return
     }
-    err = repCall.Send(&repMsg)
+    err = repCall.Send(repMsg)
     if err != nil{
         log.Print("Error 114")
         log.Print(err)
@@ -280,8 +302,6 @@ func main(){
         rgeoclient  = NewRedis(*redisGeo)
         time.Sleep(time.Second*1)
     }
-    fmt.Println(rgeoclient.redis.Conn())
-    fmt.Println(rclient.redis.Conn())
 
 
     // Starting server
