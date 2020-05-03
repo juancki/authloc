@@ -132,9 +132,11 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         w.Write(([]byte)("Expected json format with a keys: Token, Message. All strings."))
         return
     }
+    // 
     rclient.Lock()
     tokenlookup := rclient.redis.Get(incoming.Token)
     rclient.Unlock()
+    //
     if tokenlookup.Err() != nil {
         // Token not found in our token DB.
         log.Print(tokenlookup.Err())
@@ -166,35 +168,50 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     repMsg := new(pb.ReplicationMsg)
     repMsg.CUuids = ids
     repMsg.Msg = []byte (incoming.Message)
-    repMsg.MsgMime = make(map[string]string)
-    // TODO add headers such as content type ...
-    conn, err := grpc.Dial("localhost:8090",grpc.WithInsecure(),grpc.WithBlock())
-    if err != nil{
-        log.Print("Error 112")
-        log.Print(err)
-        send500error(w)
-        return
-    }
+    repMsg.MsgMime = make(map[string]string) // TODO add headers such as content type ...
+    grpcmsgs <- repMsg
+}
+
+func gRPCworker(addr string){
+    conn, err := grpc.Dial(addr,grpc.WithInsecure(),grpc.WithBlock())
     c := pb.NewWsBackClient(conn)
-    ctx, cancel := context.WithTimeout(context.Background(),30*time.Second)
+    ctx, cancel := context.WithTimeout(context.Background(), time.Hour)// TODO find a better number for context timeout
     defer cancel()
     defer conn.Close()
     repCall, err := c.Replicate(ctx)
     if err != nil{
-        log.Print("Error 113")
+        log.Print("Error 112")
         log.Print(err)
-        send500error(w)
         return
     }
-    err = repCall.Send(repMsg)
-    if err != nil{
-        log.Print("Error 114")
-        log.Print(err)
-        send500error(w)
-        return
+    // Responding to incomming grpcmessages to deliver
+    for true {
+        repMsg := <-grpcmsgs
+        err = repCall.Send(repMsg)
+        if err != nil{
+            log.Print("Error 114")
+            log.Print(err)
+            return
+        }
+        log.Printf("Forwarded message about uuids: %+v",repMsg.CUuids)
     }
-    log.Printf("Forwarded message about uuids: %+v",ids)
 }
+
+// This should be initialized with `go gRPCmaster()`
+// This continuously spaws a gRPCworker to maintail a 
+// pool of 1 worker.
+func gRPCmaster(addr string) {
+    var wg sync.WaitGroup
+    for true {
+        wg.Add(1)
+        go func (){
+            gRPCworker(addr)
+            wg.Done()
+        }()
+        wg.Wait()
+    }
+}
+
 
 func send500error(w http.ResponseWriter){
         w.WriteHeader(http.StatusInternalServerError)
@@ -270,20 +287,25 @@ func NewPostgre(connURL string) *Postgre{
 
 }
 
+
 var rclient *Redis
 var rgeoclient *Redis
 var pclient *Postgre
+var grpcmsgs chan *pb.ReplicationMsg
 
 func main(){
     port := flag.String("port", "localhost:8000", "port to connect (server)")
     redis:= flag.String("redis", "@localhost:6379/0", "format password@IPAddr:port")
     redisGeo := flag.String("redisGeo", "@localhost:6379/1", "format password@IPAddr:port")
     postgre := flag.String("postgre", "authloc:Authloc2846@localhost:5432/postgis_db", "user:password@IPAddr:port/dbname")
+    grpcSrv := flag.String("grpc", "localhost:8090", "IPv4.addrs:port")
     flag.Parse()
     fport := *port
     if strings.Index(*port,":") == -1 {
         fport = "localhost:" + *port
     }
+
+
     // Set up Postgre
     pclient = nil
     for pclient == nil{
@@ -303,14 +325,16 @@ func main(){
     }
 
 
+    // gRPC connection handler
+    grpcmsgs = make(chan *pb.ReplicationMsg)
+    go gRPCmaster(*grpcSrv)
+
+
     // Starting server
     fmt.Println("Starting authlo c...") // ,*frontport,"for front, ",*backport," for back")
     fmt.Println("--------------------------------------------------------------- ")
 
-
     router := mux.NewRouter()
-
-
     router.HandleFunc("/", HomeHandler)
     router.HandleFunc("/auth", AuthlocHandler)
     router.HandleFunc("/writemsg", WriteMsgHandler)
@@ -326,5 +350,4 @@ func main(){
         ReadTimeout:  15 * time.Second,
     }
     log.Fatal(srv.ListenAndServe())
-
 }
