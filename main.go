@@ -126,8 +126,8 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     decoder := json.NewDecoder(r.Body)
     decoder.DisallowUnknownFields()
     err := decoder.Decode(&incoming)
-    log.Print(incoming)
     if err != nil{
+        log.Print(incoming)
         w.WriteHeader(http.StatusBadRequest)
         w.Write(([]byte)("Expected json format with a keys: Token, Message. All strings."))
         return
@@ -163,14 +163,12 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         send500error(w)
         return
     }
-    log.Print(ids)
     repMsg := new(pb.ReplicationMsg)
     repMsg.CUuids = ids
     repMsg.Msg = []byte (incoming.Message)
     repMsg.MsgMime = make(map[string]string)
-    repMsg.MsgMime["Content-type"] = "text"
-    conn, err := grpc.Dial("localhost:8090",grpc.WithInsecure())
-    defer conn.Close()
+    // TODO add headers such as content type ...
+    conn, err := grpc.Dial("localhost:8090",grpc.WithInsecure(),grpc.WithBlock())
     if err != nil{
         log.Print("Error 112")
         log.Print(err)
@@ -180,6 +178,7 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     c := pb.NewWsBackClient(conn)
     ctx, cancel := context.WithTimeout(context.Background(),30*time.Second)
     defer cancel()
+    defer conn.Close()
     repCall, err := c.Replicate(ctx)
     if err != nil{
         log.Print("Error 113")
@@ -194,7 +193,7 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         send500error(w)
         return
     }
-    log.Print("Send message successfully")
+    log.Printf("Forwarded message about uuids: %+v",ids)
 }
 
 func send500error(w http.ResponseWriter){
@@ -224,7 +223,7 @@ func NewRedis(connURL string) *Redis{
     dbnum,_ := strconv.Atoi(strings.Split(connURL,"/")[1])
     connURL = strings.Split(connURL,"/")[0]
 
-    pass := strings.Split(connURL,"@")[0] 
+    pass := strings.Split(connURL,"@")[0]
     log.Print("`",pass,"`\t",len(pass))
     addr := strings.Split(connURL,"@")[1]
     client := redis.NewClient(&redis.Options{
