@@ -169,6 +169,9 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     repMsg.CUuids = ids
     repMsg.Msg = []byte (incoming.Message)
     repMsg.MsgMime = make(map[string]string) // TODO add headers such as content type ...
+    if tp := r.Header.Get("Content-Type"); tp != ""{
+        repMsg.MsgMime["Content-Type"] = tp
+    }
     grpcmsgs <- repMsg
 }
 
