@@ -14,4 +14,4 @@ require (
 	google.golang.org/protobuf v1.21.0 // indirect
 )
 
-// replace github.com/juancki/wsholder => /home/gojuancarlos/go/src/github.com/juancki/wsholder
+replace github.com/juancki/wsholder => /home/gojuancarlos/go/src/github.com/juancki/wsholder

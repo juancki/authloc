@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
+	"github.com/golang/protobuf/ptypes"
 )
 
 // Config
@@ -168,9 +169,14 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     repMsg := new(pb.ReplicationMsg)
     repMsg.CUuids = ids
     repMsg.Msg = []byte (incoming.Message)
-    repMsg.MsgMime = make(map[string]string) // TODO add headers such as content type ...
+    // Filling META
+    repMsg.Meta = new(pb.Metadata)
+    repMsg.Meta.Poster = cuuid
+    repMsg.Meta.Resource = "/msg/[chat-id]/[m-id]"
+    repMsg.Meta.Arrived = ptypes.TimestampNow()
+    repMsg.Meta.MsgMime = make(map[string]string) // TODO add headers such as content type ...
     if tp := r.Header.Get("Content-Type"); tp != ""{
-        repMsg.MsgMime["Content-Type"] = tp
+        repMsg.Meta.MsgMime["Content-Type"] = tp
     }
     grpcmsgs <- repMsg
 }
