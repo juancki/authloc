@@ -1,9 +1,12 @@
 
 package main
 import (
+	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +19,8 @@ import (
 
 	// Third party libs
 	"github.com/go-redis/redis/v7"
+	"github.com/golang/protobuf/ptypes"
+        timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	cPool "github.com/juancki/wsholder/connectionPool"
@@ -24,7 +29,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
-	"github.com/golang/protobuf/ptypes"
 )
 
 // Config
@@ -64,8 +68,7 @@ func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
     var body Authloc
     err := json.NewDecoder(r.Body).Decode(&body)
     if err != nil{
-        w.WriteHeader(http.StatusBadRequest)
-        w.Write(([]byte)("Expected json format with keys: Name, Pass, Loc. All strings."))
+        send400error(w,"Expected json format with keys: Name, Pass, Loc. All strings.")
         return
     }
     raw := fmt.Sprintf("%s:%s:%s",body.Name,body.Pass,body.Loc)
@@ -76,8 +79,7 @@ func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
     result := rclient.redis.Set(body.token,value,time.Hour*2) // TODO: make it come from config.
     rclient.Unlock()
     if result.Err() != nil{
-        log.Println("Error 101")
-        log.Println(err)
+        log.Println("Error 101: ", err)
         send500error(w)
         return
     }
@@ -120,6 +122,108 @@ type WriteMsg struct {
     Token string
     Message string
     // CUUID string
+    Mime map[string]string
+}
+
+
+func cuuidTokenLookup(token string) (string,error){
+    // 
+    rclient.Lock()
+    tokenlookup := rclient.redis.Get(token)
+    rclient.Unlock()
+    //
+    if tokenlookup.Err() != nil {
+        log.Print(tokenlookup.Err())
+        return "", errors.New("Invalid token")
+    }
+    res, _:= tokenlookup.Result()
+    splits := strings.Split(res,":")
+    if len(splits) <4 {
+        // The cuuid is the last position of the 
+        // redis entry starting from the 4th position element [3].
+        // Basically, client needs to connect first to wsholder to 
+        // to send a message.
+        return "", errors.New("To send a message is req to be connected to the feed.")
+    }
+    cuuid := splits[len(splits)-1]
+    return cuuid,nil
+}
+
+
+func createMsgId(strseed string,nanos int32,seconds int64) string{
+    // set message id
+    hasher := sha1.New()
+    hasher.Write([]byte(strseed))
+    buf := make([]byte,10)
+    binary.BigEndian.PutUint32(buf, uint32(nanos))
+    hasher.Write(buf)
+    msgid := base64.URLEncoding.EncodeToString(hasher.Sum(nil))[0:7]
+    return msgid
+}
+
+func NewChatReplicationMsg(ids []cPool.Uuid,
+                        chatid *string,
+                        incoming *WriteMsg,
+                        timearrived *timestamppb.Timestamp) *pb.ReplicationMsg {
+
+    repMsg := &pb.ReplicationMsg{CUuids:ids,Msg: []byte(incoming.Message)}
+    msgid := createMsgId(*chatid,timearrived.Nanos,timearrived.Seconds)
+    // Filling META
+    resource := fmt.Sprintf("/msg/%s/%s",*chatid, msgid)
+    repMsg.Meta = &pb.Metadata{Resource: resource, Arrived: timearrived}
+    return repMsg
+
+}
+
+func writeToChatFromValue(chatid *string, incoming *WriteMsg) (error, error){
+    // err400,err500 := writeToChatFromValue(&chatid,&incoming)
+    timearrived := ptypes.TimestampNow()
+    cuuid,err :=  cuuidTokenLookup(incoming.Token)
+    if err != nil{
+        return err,nil
+    }
+    // if chat is open
+    ids, err := QueryNearNeighbourhs(cuuid)
+    // else -> QueryMembersId
+    if err != nil{
+        // TODO Handle this error: Query broken: Bad connection or sth.
+        log.Printf("Error 111\tcuuid: %s\n\t\t\t|cuuids: %+v\n\t\t\t+err: %s",cuuid, ids, err)
+        return nil,err
+    }
+    repMsg := NewChatReplicationMsg(ids,chatid,incoming,timearrived)
+    repMsg.Meta.Poster = cuuid
+    repMsg.Meta.MsgMime = make(map[string]string) // TODO add headers such as content type ...
+    grpcmsgs <- repMsg
+    return nil,nil
+}
+
+
+func WriteMsgChatHandler(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    chatid, ok := vars["chatid"]
+    if !ok {
+        log.Print("Error 110")
+        send400error(w,"Bad requests, this URL is /write/chat/[chat-id]")
+    }
+    var incoming WriteMsg
+    decoder := json.NewDecoder(r.Body)
+    decoder.DisallowUnknownFields()
+    err := decoder.Decode(&incoming)
+    if err != nil{
+        log.Print(incoming)
+        send400error(w, "Expected json format with a keys: Token, Message. All strings.")
+        return
+    }
+    err400,err500 := writeToChatFromValue(&chatid,&incoming)
+    if err400 != nil {
+        send400error(w,err.Error())
+        return
+    }
+    if err500 != nil {
+        send500error(w)
+        return
+    }
+    // save to user d
 }
 
 func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
@@ -129,51 +233,24 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     err := decoder.Decode(&incoming)
     if err != nil{
         log.Print(incoming)
-        w.WriteHeader(http.StatusBadRequest)
-        w.Write(([]byte)("Expected json format with a keys: Token, Message. All strings."))
+        send400error(w,"Expected json format with a keys: Token, Message. All strings.")
         return
     }
-    // 
-    rclient.Lock()
-    tokenlookup := rclient.redis.Get(incoming.Token)
-    rclient.Unlock()
-    //
-    if tokenlookup.Err() != nil {
-        // Token not found in our token DB.
-        log.Print(tokenlookup.Err())
-        w.WriteHeader(http.StatusForbidden)
-        w.Write([]byte ("Invalid token."))
+    cuuid,err :=  cuuidTokenLookup(incoming.Token)
+    if err != nil{
+        send400error(w,err.Error())
         return
     }
-    res, err := tokenlookup.Result()
-    splits := strings.Split(res,":")
-    if len(splits) <4 {
-        // The cuuid is the last position of the 
-        // redis entry starting from the 4th position element [3].
-        // Basically, client needs to connect first to wsholder to 
-        // to send a message.
-        w.WriteHeader(http.StatusForbidden)
-        w.Write([]byte("To send a message is req to be connected to the feed."))
-        return
-    }
-    cuuid := splits[len(splits)-1]
     // TODO Handle this error: Query broken: Bad connection or sth.
     ids, err := QueryNearNeighbourhs(cuuid)
     if err != nil{
-        log.Printf("\tcuuid: %s\n\t\t\t|cuuids: %+v\n\t\t\t+err: %s",cuuid, ids, err)
-        log.Print("Error 111")
-        log.Print(err)
+        log.Printf("Error 111\tcuuid: %s\n\t\t\t|cuuids: %+v\n\t\t\t+err: %s",cuuid, ids, err)
         send500error(w)
         return
     }
-    repMsg := new(pb.ReplicationMsg)
-    repMsg.CUuids = ids
-    repMsg.Msg = []byte (incoming.Message)
+    repMsg := &pb.ReplicationMsg{CUuids:ids,Msg: []byte(incoming.Message)}
     // Filling META
-    repMsg.Meta = new(pb.Metadata)
-    repMsg.Meta.Poster = cuuid
-    repMsg.Meta.Resource = "/msg/[chat-id]/[m-id]"
-    repMsg.Meta.Arrived = ptypes.TimestampNow()
+    repMsg.Meta = &pb.Metadata{Poster:cuuid, Resource: "/msg/[chat-id]/[m-id]", Arrived: ptypes.TimestampNow()}
     repMsg.Meta.MsgMime = make(map[string]string) // TODO add headers such as content type ...
     if tp := r.Header.Get("Content-Type"); tp != ""{
         repMsg.Meta.MsgMime["Content-Type"] = tp
@@ -223,8 +300,13 @@ func gRPCmaster(addr string) {
 
 
 func send500error(w http.ResponseWriter){
-        w.WriteHeader(http.StatusInternalServerError)
-        w.Write( []byte("Please retry in a few seoncds."))
+    w.WriteHeader(http.StatusInternalServerError)
+    w.Write([]byte("Please retry in a few seoncds."))
+}
+
+func send400error(w http.ResponseWriter,str string){
+    w.WriteHeader(http.StatusBadRequest)
+    w.Write([]byte(str))
 }
 
 type Redis struct{
@@ -314,7 +396,6 @@ func main(){
         fport = "localhost:" + *port
     }
 
-
     // Set up Postgre
     pclient = nil
     for pclient == nil{
@@ -347,6 +428,9 @@ func main(){
     router.HandleFunc("/", HomeHandler)
     router.HandleFunc("/auth", AuthlocHandler)
     router.HandleFunc("/writemsg", WriteMsgHandler)
+    router.HandleFunc("/write/chat/{chatid]}", WriteMsgChatHandler)
+//    router.HandleFunc("/create/chat", CreateChatHandler)
+//    router.HandleFunc("/create/event", CreateEventHandler)
     loggedRouter := handlers.LoggingHandler(os.Stdout, router)
 
 
