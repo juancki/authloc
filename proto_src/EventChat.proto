@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+option go_package = ".;pb";
+
+package pb;
+
+// import "protobuf/timestamp.proto";
+
+
+message Event{
+    string Name = 1;
+    int64 N = 2;
+    uint64 Uuids  = 3;
+}
+
+

@@ -2,29 +2,27 @@
 package main
 import (
 	"crypto/sha1"
-	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	// Third party libs
-	"github.com/go-redis/redis/v7"
 	"github.com/golang/protobuf/ptypes"
         timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	cPool "github.com/juancki/wsholder/connectionPool"
 	pb "github.com/juancki/wsholder/pb"
+// 	authpb "github.com/juancki/authloc/pb"
+	mydb "github.com/juancki/authloc/dbutils"
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/context"
@@ -57,8 +55,8 @@ type Authloc struct{
     Name string
     Pass string
     Loc string
-    token string
 }
+
 func string2base64(s string) string {
     return base64.StdEncoding.EncodeToString([]byte(s))
 }
@@ -71,46 +69,16 @@ func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
         send400error(w,"Expected json format with keys: Name, Pass, Loc. All strings.")
         return
     }
-    raw := fmt.Sprintf("%s:%s:%s",body.Name,body.Pass,body.Loc)
-    hashed, _ :=bcrypt.GenerateFromPassword([]byte(raw),bcrypt.MinCost)
-    body.token = string(hashed) // TODO reduce token size to decrease impact in mem
-    value := fmt.Sprintf("%s:%s:%s:",string2base64(body.Loc),string2base64(body.Name),"timeFormated") // TODO fix time formatting
-    rclient.Lock()
-    result := rclient.redis.Set(body.token,value,time.Hour*2) // TODO: make it come from config.
-    rclient.Unlock()
-    if result.Err() != nil{
+    raw := fmt.Sprintf("%s:%s:%s", body.Name, body.Pass, body.Loc)
+    hashed, _ := bcrypt.GenerateFromPassword([]byte(raw),bcrypt.MinCost)
+    token := string(hashed) // TODO reduce token size to decrease impact in mem
+    err = rclient.SetToken(token, body.Name, body.Loc)
+    if err != nil{
         log.Println("Error 101: ", err)
         send500error(w)
         return
     }
-    fmt.Fprintf(w,"{\"Token\":\"%s\"}",body.token) // Json formated
-}
-
-
-
-
-func QueryNearNeighbourhs (cuuid string )([]cPool.Uuid,error){
-    query := redis.GeoRadiusQuery{}
-    query.Radius =  10
-    query.Unit = "km"
-    rgeoclient.Lock()
-    query_out := rgeoclient.redis.GeoRadiusByMember(WORLD,cuuid,&query)
-    rgeoclient.Unlock()
-    if query_out.Err() != nil{
-        log.Println("query_out: ",query_out)
-        return nil,query_out.Err()
-    }
-
-    geoquery,_ := query_out.Result()
-    cuuids :=  make([]cPool.Uuid,len(geoquery))
-    for index, geoloc := range geoquery{
-        cid, err := cPool.Base64_2_uuid(geoloc.Name)
-        if err != nil{
-            return nil,err
-        }
-        cuuids[index] = cid
-    }
-    return cuuids, nil
+    fmt.Fprintf(w,"{\"Token\":\"%s\"}",token) // Json formated
 }
 
 
@@ -123,30 +91,6 @@ type WriteMsg struct {
     Message string
     // CUUID string
     Mime map[string]string
-}
-
-
-func cuuidTokenLookup(token string) (string,error){
-    // 
-    rclient.Lock()
-    tokenlookup := rclient.redis.Get(token)
-    rclient.Unlock()
-    //
-    if tokenlookup.Err() != nil {
-        log.Print(tokenlookup.Err())
-        return "", errors.New("Invalid token")
-    }
-    res, _:= tokenlookup.Result()
-    splits := strings.Split(res,":")
-    if len(splits) <4 {
-        // The cuuid is the last position of the 
-        // redis entry starting from the 4th position element [3].
-        // Basically, client needs to connect first to wsholder to 
-        // to send a message.
-        return "", errors.New("To send a message is req to be connected to the feed.")
-    }
-    cuuid := splits[len(splits)-1]
-    return cuuid,nil
 }
 
 
@@ -172,18 +116,17 @@ func NewChatReplicationMsg(ids []cPool.Uuid,
     resource := fmt.Sprintf("/msg/%s/%s",*chatid, msgid)
     repMsg.Meta = &pb.Metadata{Resource: resource, Arrived: timearrived}
     return repMsg
-
 }
 
 func writeToChatFromValue(chatid *string, incoming *WriteMsg) (error, error){
     // err400,err500 := writeToChatFromValue(&chatid,&incoming)
     timearrived := ptypes.TimestampNow()
-    cuuid,err :=  cuuidTokenLookup(incoming.Token)
+    cuuid,err :=  rclient.GetCuuidFromToken(incoming.Token)
     if err != nil{
         return err,nil
     }
     // if chat is open
-    ids, err := QueryNearNeighbourhs(cuuid)
+    ids, err := rgeoclient.QueryNearNeighbourhs(cuuid)
     // else -> QueryMembersId
     if err != nil{
         // TODO Handle this error: Query broken: Bad connection or sth.
@@ -202,8 +145,8 @@ func WriteMsgChatHandler(w http.ResponseWriter, r *http.Request) {
     vars := mux.Vars(r)
     chatid, ok := vars["chatid"]
     if !ok {
-        log.Print("Error 110")
         send400error(w,"Bad requests, this URL is /write/chat/[chat-id]")
+        return
     }
     var incoming WriteMsg
     decoder := json.NewDecoder(r.Body)
@@ -236,13 +179,13 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         send400error(w,"Expected json format with a keys: Token, Message. All strings.")
         return
     }
-    cuuid,err :=  cuuidTokenLookup(incoming.Token)
+    cuuid,err :=  rclient.GetCuuidFromToken(incoming.Token)
     if err != nil{
         send400error(w,err.Error())
         return
     }
     // TODO Handle this error: Query broken: Bad connection or sth.
-    ids, err := QueryNearNeighbourhs(cuuid)
+    ids, err := rgeoclient.QueryNearNeighbourhs(cuuid)
     if err != nil{
         log.Printf("Error 111\tcuuid: %s\n\t\t\t|cuuids: %+v\n\t\t\t+err: %s",cuuid, ids, err)
         send500error(w)
@@ -309,79 +252,11 @@ func send400error(w http.ResponseWriter,str string){
     w.Write([]byte(str))
 }
 
-type Redis struct{
-    redis redis.Client
-    sync.Mutex
-}
 
 
-type Postgre struct{
-    pg sql.DB
-    sync.Mutex
-}
-
-
-func NewRedis(connURL string) *Redis{
-    // redis://password@netloc:port/dbnum
-    // redis does not have a username
-    key := "redis://"
-    if strings.HasPrefix(connURL,key){
-        connURL = connURL[len(key):]
-    }
-    dbnum,_ := strconv.Atoi(strings.Split(connURL,"/")[1])
-    connURL = strings.Split(connURL,"/")[0]
-
-    pass := strings.Split(connURL,"@")[0]
-    log.Print("`",pass,"`\t",len(pass))
-    addr := strings.Split(connURL,"@")[1]
-    client := redis.NewClient(&redis.Options{
-            Addr:     addr,
-            Password: "", // no password set
-            DB:       dbnum,  // use default DB
-    })
-
-    pong, err := client.Ping().Result()
-    if err != nil{
-        // Exponential backoff
-        log.Print("Un able to connect to REDIS `", dbnum,"` at: `", addr, "` with password: `",pass,"`.")
-        log.Print(err)
-        return nil
-    }
-    log.Print("I said PING, Redis said: ",pong)
-    return &Redis{redis: *client}
-
-}
-
-func NewPostgre(connURL string) *Postgre{
-    // postgresql://user:password@netloc:port/dbname
-    key := "postgresql://"
-    if strings.HasPrefix(connURL,key){
-        connURL = connURL[len(key):]
-    }
-    dbname := strings.Split(connURL,"/")[1]
-    connURL = strings.Split(connURL,"/")[0]
-
-    creds := strings.Split(connURL,"@")[0]
-    user := strings.Split(creds,":")[0]
-    pass := strings.Split(creds,":")[1]
-    addr := strings.Split(connURL,"@")[1]
-    host := strings.Split(addr,":")[0]
-    port := strings.Split(addr,":")[1]
-    psqlInfo := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-            host, port, user, pass, dbname)
-    db, err := sql.Open("postgres", psqlInfo)
-    if err != nil{
-        log.Fatal("Un able to connect to POSTGRE with ", psqlInfo)
-    }
-    log.Print("Connected to Postgre!")// with, ",psqlInfo)
-    return &Postgre{pg: *db}
-
-}
-
-
-var rclient *Redis
-var rgeoclient *Redis
-var pclient *Postgre
+var rclient *mydb.Redis
+var rgeoclient *mydb.Redis
+var pclient *mydb.Postgre
 var grpcmsgs chan *pb.ReplicationMsg
 
 func main(){
@@ -399,18 +274,19 @@ func main(){
     // Set up Postgre
     pclient = nil
     for pclient == nil{
-        pclient = NewPostgre(*postgre)
+        pclient = mydb.NewPostgre(*postgre)
     }
-    defer pclient.pg.Close()
+
+    defer pclient.Pg.Close()
     // Set up redis
     rclient = nil
     for rclient == nil{
-        rclient = NewRedis(*redis)
+        rclient = mydb.NewRedis(*redis)
         time.Sleep(time.Second*1)
     }
     rgeoclient = nil
     for rgeoclient == nil{
-        rgeoclient  = NewRedis(*redisGeo)
+        rgeoclient  = mydb.NewRedis(*redisGeo)
         time.Sleep(time.Second*1)
     }
 
