@@ -16,3 +16,4 @@ require (
 )
 
 replace github.com/juancki/wsholder => /home/gojuancarlos/go/src/github.com/juancki/wsholder
+replace github.com/juancki/authloc => /home/gojuancarlos/go/src/github.com/juancki/authloc

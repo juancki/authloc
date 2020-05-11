@@ -3,7 +3,7 @@ package dbutils
 import (
 	"database/sql"
 	"encoding/base64"
-	"encoding/binary"
+//	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -15,8 +15,11 @@ import (
 	// Third party libs
 	redis "github.com/go-redis/redis/v7"
 	"github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/ptypes"
+//        timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	authpb "github.com/juancki/authloc/pb"
 	cPool "github.com/juancki/wsholder/connectionPool"
+	wspb "github.com/juancki/wsholder/pb"
 	_ "github.com/lib/pq"
 )
 
@@ -29,11 +32,71 @@ const(
     GEOCHAT = "chat"
     CHATMEMBER = "cm:"
     EVENT = "e:"
+    CHAT = "c:"
+    CHATSTORAGE = "cs:"
     TOKEN_AUTH = "ta:"
-    USUER_CONN = "uc:"
+    USER_CONN = "uc:"
     DEFAULT_Q_RADIUS = 10
     DEFAULT_Q_UNIT = "km"
 )
+
+
+
+func (rclient *Redis) StoreChatMessage(chatid string, uni *wspb.UniMsg) error{
+    time, err := ptypes.Timestamp(uni.Meta.Arrived)
+    daymonth := time.Day() // TODO use time.YearDay() and hour to have slots of 15 min.
+    bts, err := proto.Marshal(uni)
+    if err != nil{
+        return err
+    }
+    key := fmt.Sprintf("%s%s:%d", CHATSTORAGE,chatid,daymonth)
+    rclient.Lock()
+    err = rclient.Redis.LPush(key,bts).Err()
+    rclient.Unlock()
+    if err != nil{
+        return err
+    }
+    return nil
+}
+
+func (rclient *Redis) RetreiveChatMessages(chatid string, start *time.Time, end *time.Time) ([]byte, error) {
+    dayinit := -1
+    dayfin := -1
+    if start != nil{
+        dayinit = start.Day()
+    }
+    if  end != nil{
+        dayinit = end.Day()
+    }
+
+    return rclient.queryChatMessages(chatid, dayinit, dayfin)
+}
+
+func (rclient *Redis)  queryChatMessages(chatid string, init int, fin int) ([]byte, error){
+    // optimally this should not be stored in mem but sent to a channel 
+    keypattern := fmt.Sprintf("%s%s:*",CHATSTORAGE,chatid)// TODO Find a query pattern
+    rclient.Lock()
+    req := rclient.Redis.Keys(keypattern)
+    rclient.Unlock()
+    err := req.Err()
+    if err == redis.Nil{
+        return make([]byte,0),nil
+    } else if err != nil {
+        return nil, err
+    }
+    result := make([]byte,0)
+    for _, key := range req.Val() {
+        r := rclient.Redis.LRange(key,0,-1)
+        if r.Err() != nil { // There should be any redis.Nil bc of the previous keys lookup
+            return result, err
+        }
+        for _, element := range r.Val(){
+            result = append(result,([]byte(element))...)
+        }
+    }
+    return result,nil
+}
+
 
 func coorFromString(str string) (float64,float64){
     // Coordinates are encoded in a string such that
@@ -48,25 +111,67 @@ func coorFromString(str string) (float64,float64){
 }
 
 
-func (rgeoclient *Redis) GeoAddChatCoor(location string, chatid string, event *authpb.Event) error{
-    long, lat := coorFromString(location)
-    return rgeoclient.GeoAddChat(long,lat,chatid,event)
-}
-
-
-func (rgeoclient *Redis) GeoAddChat(long float64, lat float64, chatid string, event *authpb.Event) error{
-    bts, err := proto.Marshal(event)
+func (rclient *Redis) SetChat(chatid string, chat *authpb.Chat) error{
+    bts, err := proto.Marshal(chat)
     if err != nil{
         return err
     }
+    rclient.Lock()
+    err = rclient.Redis.Set(CHAT+chatid,bts,time.Hour*2).Err()
+    rclient.Unlock()
+    if err != nil{
+        return err
+    }
+    return nil
+}
+
+
+func (rclient *Redis) RemoveChat(chatid string) error{
+    rclient.Lock()
+    err := rclient.Redis.Del(CHAT+chatid).Err()
+    rclient.Unlock()
+    if err != nil{
+        return err
+    }
+    return nil
+}
+
+func (rclient *Redis) GetChat(chatid string) (*authpb.Chat, error) {
+    var chat authpb.Chat
+    rclient.Lock()
+    lookup := rclient.Redis.Get(CHAT+chatid)
+    rclient.Unlock()
+    err := lookup.Err()
+    if err != nil{
+        return nil, err
+    }
+    bts, _ := lookup.Bytes()
+
+    err = proto.Unmarshal(bts, &chat)
+    if err != nil{
+        return nil, err
+    }
+    return &chat, nil
+}
+
+func (rgeoclient *Redis) GeoAddChat(location string, chatid string) error{
+    long, lat := coorFromString(location)
+    return rgeoclient.GeoAddChatCoor(long, lat, chatid)
+}
+
+func (rgeoclient *Redis) GeoUpdateChat(location string, chatid string) error{
+    return rgeoclient.GeoAddChat(location,chatid)
+}
+
+
+func (rgeoclient *Redis) GeoAddChatCoor(long float64, lat float64, chatid string) error{
     loc := &redis.GeoLocation{}
     loc.Latitude = lat
     loc.Longitude = long
     loc.Name = chatid
 
     rgeoclient.Lock()
-    rgeoclient.Redis.GeoAdd(GEOCHAT,loc)
-    err = rgeoclient.Redis.Set(chatid,bts,time.Hour*2).Err()
+    err := rgeoclient.Redis.GeoAdd(GEOCHAT,loc).Err()
     rgeoclient.Unlock()
     if err != nil{
         return err
@@ -74,13 +179,19 @@ func (rgeoclient *Redis) GeoAddChat(long float64, lat float64, chatid string, ev
     return nil
 }
 
+// Removes uuid from the redis geo database (thread safe).
+func (rgeo *Redis) GeoRemoveCuuid(uuid cPool.Uuid) error {
+    rgeo.Lock()
+    res := rgeo.Redis.ZRem(WORLD,cPool.Uuid2base64(uuid))
+    rgeo.Unlock()
+    return res.Err()
+}
 
 func (rclient *Redis) SetUseridCuuid(userid string, cuuid cPool.Uuid) error{
     // For now only one connection (cuuid) for each user.
-    bts := make([]byte, binary.MaxVarintLen64)
-    binary.BigEndian.PutUint64(bts,cuuid)
+    bts := cPool.Uuid2Bytes(cuuid)
     rclient.Lock()
-    err := rclient.Redis.Set(USUER_CONN+userid, bts, 2*time.Hour).Err()
+    err := rclient.Redis.Set(USER_CONN+userid, bts, 2*time.Hour).Err()
     rclient.Unlock()
     if err != nil {
         return err
@@ -88,20 +199,38 @@ func (rclient *Redis) SetUseridCuuid(userid string, cuuid cPool.Uuid) error{
     return nil
 }
 
-
-func (rclient *Redis) GetCuuidFromUserid(userids []string) ([]cPool.Uuid, error){
-    // For now only one connection (cuuid) for each user.
-    var result []cPool.Uuid
-    for _, uid := range userids {
-        rclient.Lock()
-        lookup := rclient.Redis.Get(USUER_CONN+uid)
-        rclient.Unlock()
-        if lookup.Err() == nil {
-            r, _ := lookup.Bytes()
-            result = append(result,binary.BigEndian.Uint64(r))
+func castMGetUseridToCuuid(mgetval []interface{}, userids []string) ([]cPool.Uuid, error){
+    result := make([]cPool.Uuid,0)
+    for ind ,v := range mgetval {
+        if v != nil {
+            // cPool.Bytes2Cuuid 
+            bts, ok := v.([]byte)
+            if !ok {
+                // Really an error
+                log.Print("Error unpacking user Cuuid in ",userids[ind])
+                continue
+            }
+            r := cPool.Bytes2Uuid(bts)
+            result = append(result,r)
         }
     }
     return result, nil
+}
+
+
+func (rclient *Redis) GetCuuidFromUserid(userids []string) ([]cPool.Uuid, error){
+    // For now only one connection (cuuid) for each user.
+    uidswitprefix := make([]string,len(userids))
+    for ind, uid:=  range userids{
+        uidswitprefix[ind] = USER_CONN+uid
+    }
+    rclient.Lock()
+    lookup := rclient.Redis.MGet(uidswitprefix...)
+    rclient.Unlock()
+    if lookup.Err() != nil {
+        return nil, lookup.Err()
+    }
+    return castMGetUseridToCuuid(lookup.Val(),userids)
 }
 
 func (rclient *Redis) SetChatMember(chatid string, userid string) error {
@@ -158,6 +287,20 @@ func (rclient *Redis) GetChatMembers (chatid string) ([]string, error) {
     return zmem, nil
 }
 
+func (rclient *Redis) CheckMemberInChat(chatid string, member string) (bool, error) {
+    chatmemberkey := CHATMEMBER + chatid
+    rclient.Lock()
+    res := rclient.Redis.ZScore(chatmemberkey, member)
+    rclient.Unlock()
+    err := res.Err()
+    if err == redis.Nil { // redis.Nil -> redis key does not exist
+        return false, nil
+    }else if err != nil{
+        return false, err
+    }
+    return true, nil
+}
+
 func (rclient *Redis) SetEvent(eventid string, event *authpb.Event) error {
     bts, err := proto.Marshal(event)
     if err != nil{
@@ -191,6 +334,17 @@ func (rclient *Redis) GetEvent(eventid string) (*authpb.Event,error) {
     return event, nil
 }
 
+func (rclient *Redis) Get(key string) (string,error){
+    rclient.Lock()
+    val, err := rclient.Redis.Get(key).Result()
+    rclient.Unlock()
+    if err != nil {
+        log.Println("Not succesful: ", key, " ", err)
+        return "",err
+    }
+    return val, nil
+}
+
 func (rclient *Redis) SetToken(token string, name string, loc string) error{
     // autloc   calls SetToken on auth step.
     // wsholder calls AppendCuuidIfExists on ws connection.
@@ -205,26 +359,27 @@ func (rclient *Redis) SetToken(token string, name string, loc string) error{
     return nil
 }
 
-func (rclient *Redis) AppendCuuidIfExists(token string, cuuid cPool.Uuid) error{
+func (rclient *Redis) AppendCuuidIfExists(token string, cuuid cPool.Uuid) (string, error){
     // autloc   calls SetToken on auth step.
     // wsholder calls AppendCuuidIfExists on ws connection.
     // authloc  calls GetCuuidFromToken to retreive Cuuid. On write messages functions
     // UPDATE REDIS
     rclient.Lock()
-    err := rclient.Redis.Get(token).Err()
+    r := rclient.Redis.Get(TOKEN_AUTH+token)
     rclient.Unlock()
+    err := r.Err()
     if err != nil {
-        return err
+        return "", err
     }
     rclient.Lock()
-    err = rclient.Redis.Append(token,cPool.Uuid2base64(cuuid)).Err()
+    err = rclient.Redis.Append(TOKEN_AUTH+token,cPool.Uuid2base64(cuuid)).Err()
     rclient.Unlock()
     if err != nil {
-        return err
+        return "", err
     }
-    return nil
+    value, _ := r.Result()
+    return value, nil
 }
-
 
 func (rclient *Redis) GetCuuidFromToken(token string) (string,error){
     // autloc   calls SetToken on auth step.
@@ -234,8 +389,7 @@ func (rclient *Redis) GetCuuidFromToken(token string) (string,error){
     tokenlookup := rclient.Redis.Get(TOKEN_AUTH+token)
     rclient.Unlock()
     if tokenlookup.Err() != nil {
-        log.Print(tokenlookup.Err())
-        return "", errors.New("Invalid token")
+        return "", tokenlookup.Err()
     }
     res, _:= tokenlookup.Result()
     splits := strings.Split(res,":")

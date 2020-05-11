@@ -4,13 +4,45 @@ option go_package = ".;pb";
 
 package pb;
 
-// import "protobuf/timestamp.proto";
+import "protobuf/timestamp.proto";
+
+
+message Chat {
+    string Name = 1;
+    bool IsOpen = 2;
+    string Description = 3;
+    string Tags = 4;
+    map<string,string> More = 6;
+    repeated string Members = 8;
+    google.protobuf.Timestamp Creation=9;
+    string Creator = 10;
+    string FromMessage = 11;
+}
 
 
 message Event{
     string Name = 1;
-    int64 N = 2;
-    uint64 Uuids  = 3;
+    bool IsOpen = 2;
+    string Description = 3;
+    string Tags = 4;
+    bool IsPhysical = 5;
+    map<string,string> More = 6;
+    OnlineMeet Online = 10; // online
+    PhysicalMeet Physical = 20; // in person
 }
+
+message OnlineMeet {
+    string Type = 1;
+    map<string,string> SupportLinks = 2; // instagram,discord, movie link
+}
+
+
+message PhysicalMeet {
+    string Type = 1;
+    string Maps = 2; // Coordinates or street location
+    string LocDescription = 3; // how to get there in words
+    repeated string WhatToBring = 4;
+}
+
 
 

@@ -21,7 +21,7 @@ import (
 	"github.com/gorilla/mux"
 	cPool "github.com/juancki/wsholder/connectionPool"
 	pb "github.com/juancki/wsholder/pb"
-// 	authpb "github.com/juancki/authloc/pb"
+	authpb "github.com/juancki/authloc/pb"
 	mydb "github.com/juancki/authloc/dbutils"
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -46,6 +46,45 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 const (
     WORLD= "world"
 )
+
+
+
+func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
+//     token, user, err := authenticateRequest(r)
+//     if err != nil{
+//         send401Unauthorized(w,"Expected json format with keys: Name, IsOpen, IsPhysical, among others. All strings.")
+//         return
+//     }
+    loc := "13.13:20.20"
+    user:= "pep"
+    var chat authpb.Chat
+    err := json.NewDecoder(r.Body).Decode(&chat)
+    if err != nil{
+        send400error(w,"Expected json format with keys: Name, IsOpen, IsPhysical, among others. All strings.")
+        return
+    }
+    // filling up some fields
+    chat.Creator = user
+    chat.Creation =  ptypes.TimestampNow()
+    log.Println(&chat)
+    chatid := createMsgId(loc+user, chat.Creation.Nanos, chat.Creation.Seconds)
+    err = rclient.SetChat(chatid, &chat)
+    if err != nil{
+        send500error(w)
+        return
+    }
+    if chat.IsOpen {
+        err = rclient.GeoAddChat(loc, chatid)
+        if err != nil{
+            rclient.RemoveChat(chatid)
+            send500error(w)
+            return
+        }
+    }
+    // Notify member
+    // Save this message in each member notification list. push and pop notifications.
+    // GetCuuid from Users -> send message to wsholder.
+}
 
 
 
@@ -121,7 +160,7 @@ func NewChatReplicationMsg(ids []cPool.Uuid,
 func writeToChatFromValue(chatid *string, incoming *WriteMsg) (error, error){
     // err400,err500 := writeToChatFromValue(&chatid,&incoming)
     timearrived := ptypes.TimestampNow()
-    cuuid,err :=  rclient.GetCuuidFromToken(incoming.Token)
+    cuuid, err :=  rclient.GetCuuidFromToken(incoming.Token)
     if err != nil{
         return err,nil
     }
@@ -137,6 +176,11 @@ func writeToChatFromValue(chatid *string, incoming *WriteMsg) (error, error){
     repMsg.Meta.Poster = cuuid
     repMsg.Meta.MsgMime = make(map[string]string) // TODO add headers such as content type ...
     grpcmsgs <- repMsg
+
+    var uni pb.UniMsg
+    uni.Meta = repMsg.Meta
+    uni.Msg = repMsg.Msg
+
     return nil,nil
 }
 
@@ -252,6 +296,10 @@ func send400error(w http.ResponseWriter,str string){
     w.Write([]byte(str))
 }
 
+func send401Unauthorized(w http.ResponseWriter,str string){
+    w.WriteHeader(http.StatusUnauthorized)
+    w.Write([]byte(str))
+}
 
 
 var rclient *mydb.Redis
@@ -303,10 +351,12 @@ func main(){
     router := mux.NewRouter()
     router.HandleFunc("/", HomeHandler)
     router.HandleFunc("/auth", AuthlocHandler)
+//    router.Handle("/writemsg", TimeRequest(http.HandlerFunc(WriteMsgHandler)))
     router.HandleFunc("/writemsg", WriteMsgHandler)
     router.HandleFunc("/write/chat/{chatid]}", WriteMsgChatHandler)
-//    router.HandleFunc("/create/chat", CreateChatHandler)
+    router.HandleFunc("/create/chat", CreateChatHandler)
 //    router.HandleFunc("/create/event", CreateEventHandler)
+
     loggedRouter := handlers.LoggingHandler(os.Stdout, router)
 
 
@@ -319,4 +369,12 @@ func main(){
         ReadTimeout:  15 * time.Second,
     }
     log.Fatal(srv.ListenAndServe())
+}
+///// MIDDLEWARE
+func TimeRequest(h http.Handler) http.Handler {
+    return http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        h.ServeHTTP(w, r) // call handler
+        log.Println("Elapsed: ", time.Since(start), " ms")
+    })
 }
