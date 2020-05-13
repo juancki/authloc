@@ -36,6 +36,7 @@ const(
     CHATSTORAGE = "cs:"
     TOKEN_AUTH = "ta:"
     USER_CONN = "uc:"
+    USER_TOKEN = "ut:"
     DEFAULT_Q_RADIUS = 10
     DEFAULT_Q_UNIT = "km"
 )
@@ -125,10 +126,27 @@ func (rclient *Redis) SetChat(chatid string, chat *authpb.Chat) error{
     return nil
 }
 
+func (rclient *Redis) SetUserToken(userid string, token string) error{
+    return rclient.set(USER_TOKEN+userid,[]byte(token))
+}
+
+func (rclient *Redis) GetTokenFromUser(userid string) (string, error) {
+    return rclient.Get(USER_TOKEN+userid)
+}
 
 func (rclient *Redis) RemoveChat(chatid string) error{
     rclient.Lock()
     err := rclient.Redis.Del(CHAT+chatid).Err()
+    rclient.Unlock()
+    if err != nil{
+        return err
+    }
+    return nil
+}
+
+func (rclient *Redis) set(key string, bts []byte) error{
+    rclient.Lock()
+    err := rclient.Redis.Set(key, bts,time.Hour*2).Err()
     rclient.Unlock()
     if err != nil{
         return err
@@ -204,13 +222,13 @@ func castMGetUseridToCuuid(mgetval []interface{}, userids []string) ([]cPool.Uui
     for ind ,v := range mgetval {
         if v != nil {
             // cPool.Bytes2Cuuid 
-            bts, ok := v.([]byte)
+            bts, ok := v.(string)
             if !ok {
                 // Really an error
-                log.Print("Error unpacking user Cuuid in ",userids[ind])
+                log.Print("Error unpacking user Cuuid in ",userids[ind], mgetval)
                 continue
             }
-            r := cPool.Bytes2Uuid(bts)
+            r := cPool.Bytes2Uuid([]byte(bts))
             result = append(result,r)
         }
     }
@@ -218,7 +236,7 @@ func castMGetUseridToCuuid(mgetval []interface{}, userids []string) ([]cPool.Uui
 }
 
 
-func (rclient *Redis) GetCuuidFromUserid(userids []string) ([]cPool.Uuid, error){
+func (rclient *Redis) GetCuuidFromUserid(userids ...string) ([]cPool.Uuid, error){
     // For now only one connection (cuuid) for each user.
     uidswitprefix := make([]string,len(userids))
     for ind, uid:=  range userids{
@@ -230,15 +248,19 @@ func (rclient *Redis) GetCuuidFromUserid(userids []string) ([]cPool.Uuid, error)
     if lookup.Err() != nil {
         return nil, lookup.Err()
     }
-    return castMGetUseridToCuuid(lookup.Val(),userids)
+    result,_ := lookup.Result()
+    return castMGetUseridToCuuid(result ,userids)
 }
 
-func (rclient *Redis) SetChatMember(chatid string, userid string) error {
-    memb := &redis.Z{}
-    memb.Member = userid
+func (rclient *Redis) SetChatMember(chatid string, userid ...string) error {
+    mem := make([]*redis.Z,len(userid))
+    for index, value := range userid{
+        mem[index] = &redis.Z{}
+        mem[index].Member = value
+    }
     chatmemberkey := CHATMEMBER + chatid
     rclient.Lock()
-    err := rclient.Redis.ZAdd(chatmemberkey, memb).Err()
+    err := rclient.Redis.ZAdd(chatmemberkey, mem...).Err()
     rclient.Unlock()
     if err != nil {
         return err
@@ -265,7 +287,9 @@ func (rclient *Redis) RemoveAllChatMembers(chatid string) error {
     rclient.Lock()
     err := rclient.Redis.Del(chatmemberkey).Err()
     rclient.Unlock()
-    if err != nil {
+    if err == redis.Nil{
+        return nil
+    }else if err != nil {
         return err
     }
     return nil
@@ -379,6 +403,21 @@ func (rclient *Redis) AppendCuuidIfExists(token string, cuuid cPool.Uuid) (strin
     }
     value, _ := r.Result()
     return value, nil
+}
+
+func (rclient *Redis) GetUserFromToken(token string) (string,error){
+    // autloc   calls SetToken on auth step.
+    // authloc  calls GetUserFromToken to retreive userid. On write messages functions
+    rclient.Lock()
+    tokenlookup := rclient.Redis.Get(TOKEN_AUTH+token)
+    rclient.Unlock()
+    if tokenlookup.Err() != nil {
+        return "", tokenlookup.Err()
+    }
+    res, _:= tokenlookup.Result()
+    splits := strings.Split(res,":")
+    userid := splits[1]
+    return userid, nil
 }
 
 func (rclient *Redis) GetCuuidFromToken(token string) (string,error){
