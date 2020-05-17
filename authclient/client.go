@@ -55,6 +55,10 @@ func NewClient(urlbase, wSaddr, name, pass, location string) (*Client, error){
     return client, nil
 }
 
+func (mclient *Client) Authenticate() (error){
+    return mclient.authenticate()
+}
+
 func (mclient *Client) authenticate() (error){
     p := new(Person)
     p.Name  = mclient.Username
@@ -63,14 +67,16 @@ func (mclient *Client) authenticate() (error){
     url := mclient.Urlbase + "/auth"
 
     bts, err := json.Marshal(&p)
-    if err != nil{ return  err}
-
-    fmt.Println("Accessing: ",url, " with: ",string(bts))
-    if err != nil{ return  err}
+    if err != nil{
+        return  err
+    }
 
     token := new(TokenResponse)
     err = getJson(url, bts, token)
-    if err != nil{ return  err}
+    if err != nil{
+        fmt.Println("Error accessing: ",url, " with: ",string(bts))
+        return  err
+    }
     mclient.Token = token.Token
     return nil
 }
@@ -135,7 +141,10 @@ func receiveMsgs(ip string, token string, respchan chan<- *wspb.UniMsg){
     // Dial
     defer close(respchan)
     conn, err := net.Dial("tcp", ip)
-    if err != nil{ fmt.Print(err); return}
+    if err != nil{
+        fmt.Print(err);
+        return
+    }
     // Send token
     sendbytes := make([]byte,len(token)+2)
     sendbytes[0] = ':'
@@ -166,16 +175,15 @@ func receiveMsgs(ip string, token string, respchan chan<- *wspb.UniMsg){
             return
         }
         respchan <- rcv
-        fmt.Print(len(rcv.GetMsg()),"B ")
         if rcv == nil || rcv.Meta == nil{
             continue
         }
-        fmt.Print(rcv.GetMeta().Resource, " ", rcv.Meta.Poster)
-        fmt.Print(rcv.GetMeta().GetMsgMime())
-        if tpe, ok := rcv.GetMeta().GetMsgMime()["Content-Type"]; ok && tpe != "bytes"{
-            fmt.Print(" `",string(rcv.GetMsg()),"`")
-        }
-        fmt.Println()
+        // fmt.Print(rcv.GetMeta().Resource, " ", rcv.Meta.Poster)
+        // fmt.Print(rcv.GetMeta().GetMsgMime())
+        // if tpe, ok := rcv.GetMeta().GetMsgMime()["Content-Type"]; ok && tpe != "bytes"{
+        //     fmt.Print(" `",string(rcv.GetMsg()),"`")
+        // }
+        // fmt.Println()
     }
 }
 
@@ -206,30 +214,26 @@ type ChatidResponse struct {
     Chatid string `json:"chatid"`
 }
 
-func (mclient *Client) CreateChat(name, description string)(*ChatidResponse , error){
+func (mclient *Client) CreateChat(name, description string, members[]string)(*ChatidResponse , error){
     if !mclient.IsAuthenticated(){
         mclient.authenticate()
     }
-    _, crep, err:= mclient.createchat(name,description)
+    _, crep, err:= mclient.createchat(name, description, members)
     return crep,err
 
 }
 
-func (mclient *Client) createchat(name string, description string) (string, *ChatidResponse , error){
-
+func (mclient *Client) createchat(name string, description string, members []string) (string, *ChatidResponse , error){
     var chat authpb.Chat
     chat.Name = name
     chat.Description = description
     chat.IsOpen = true
-    chat.Members = make([]string,1)
-    chat.Members[0] = "John"
+    chat.Members = members
     chat.More = make(map[string]string)
-    chat.More["this"] = "that"
     bts, err := json.Marshal(&chat)
     if err != nil{ return "", nil, err}
 
     url :=  mclient.Urlbase +"/create/chat"
-    fmt.Println("Accessing: ",url, " with: ",string(bts))
     r, err := authPost(mclient.Token,url, "text/plain", bts)
     if err != nil{
         return "", nil, err
