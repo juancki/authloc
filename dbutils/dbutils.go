@@ -27,6 +27,13 @@ func string2base64(s string) string {
     return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
+func base64_2_string(b64 string) string {
+    bts, err := base64.StdEncoding.DecodeString(b64)
+    if err != nil{
+        return ""
+    }
+    return string(bts)
+}
 const(
     WORLD = "world"
     GEOCHAT = "chat"
@@ -99,7 +106,7 @@ func (rclient *Redis)  queryChatMessages(chatid string, init int, fin int) ([]by
 }
 
 
-func coorFromString(str string) (float64,float64){
+func CoorFromString(str string) (float64,float64){
     // Coordinates are encoded in a string such that
     // "long:lat" with both long and lat with decimals.
     ind := strings.Split(str,":")
@@ -173,7 +180,7 @@ func (rclient *Redis) GetChat(chatid string) (*authpb.Chat, error) {
 }
 
 func (rgeoclient *Redis) GeoAddChat(location string, chatid string) error{
-    long, lat := coorFromString(location)
+    long, lat := CoorFromString(location)
     return rgeoclient.GeoAddChatCoor(long, lat, chatid)
 }
 
@@ -405,6 +412,28 @@ func (rclient *Redis) AppendCuuidIfExists(token string, cuuid cPool.Uuid) (strin
     return value, nil
 }
 
+func (rclient *Redis) GetAllFromToken(token string) (map[string]string,error){
+    // keys: loc, userid, created, [cuuid]
+    // autloc   calls SetToken on auth step.
+    // wsholder calls AppendCuuidIfExists on ws connection.[optional]
+    rclient.Lock()
+    tokenlookup := rclient.Redis.Get(TOKEN_AUTH+token)
+    rclient.Unlock()
+    if tokenlookup.Err() != nil {
+        return nil, tokenlookup.Err()
+    }
+    res, _:= tokenlookup.Result()
+    splits := strings.Split(res,":")
+    result := make(map[string]string)
+    result["loc"] = base64_2_string(splits[0])
+    result["userid"] = base64_2_string(splits[1])
+    result["created"] = base64_2_string(splits[2])
+    if len(splits) >= 4{
+        result["cuuid"] = splits[len(splits)-1]
+    }
+    return result, nil
+}
+
 func (rclient *Redis) GetUserFromToken(token string) (string,error){
     // autloc   calls SetToken on auth step.
     // authloc  calls GetUserFromToken to retreive userid. On write messages functions
@@ -416,7 +445,7 @@ func (rclient *Redis) GetUserFromToken(token string) (string,error){
     }
     res, _:= tokenlookup.Result()
     splits := strings.Split(res,":")
-    userid := splits[1]
+    userid := base64_2_string(splits[1])
     return userid, nil
 }
 
@@ -472,6 +501,29 @@ func (rgeoclient *Redis) QueryNearChats (cuuid string) ([]string, error){
     return chatids, nil
 }
 
+func (rgeoclient *Redis)QueryNearNeighbourhsByCoor(coordinates string) ([]cPool.Uuid, error){
+    query := redis.GeoRadiusQuery{}
+    query.Radius =  DEFAULT_Q_RADIUS // This radius should be similar to QueryNearNeigh
+    query.Unit = DEFAULT_Q_UNIT
+    long, lat := CoorFromString(coordinates)
+    rgeoclient.Lock() //////////////////////////////////////// LOCK
+    query_out := rgeoclient.Redis.GeoRadius(WORLD,long,lat,&query)
+    rgeoclient.Unlock()///////////////////////////////////// UNLOCK
+    if query_out.Err() != nil{
+        log.Println("query_out: ",query_out)
+        return nil,query_out.Err()
+    }
+    geoquery,_ := query_out.Result()
+    cuuids :=  make([]cPool.Uuid,len(geoquery))
+    for index, geoloc := range geoquery{
+        cid, err := cPool.Base64_2_uuid(geoloc.Name)
+        if err != nil{
+            return nil,err
+        }
+        cuuids[index] = cid
+    }
+    return cuuids, nil
+}
 func (rgeoclient *Redis)QueryNearNeighbourhs (cuuid string) ([]cPool.Uuid, error){
     query := redis.GeoRadiusQuery{}
     query.Radius =  DEFAULT_Q_RADIUS // This radius should be similar to QueryNearNeigh

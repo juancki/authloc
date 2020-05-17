@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/mux"
 	pb "github.com/juancki/wsholder/pb"
 	authpb "github.com/juancki/authloc/pb"
+	geohash "github.com/mmcloughlin/geohash"
 	mydb "github.com/juancki/authloc/dbutils"
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -71,16 +72,15 @@ func sendMessageToChat(chatid string, rep *pb.ReplicationMsg) error {
 
 
 func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
-//     TODO
-//     user, err := authenticateRequest(r)
-//     if err != nil{
-//         send401Unauthorized(w,"Expected bearer token.")
-//         return
-//     }
-    loc := "13.13:20.20"
-    user:= "pep"
+    row, err := authenticateRequestPlusRow(r)
+    if err != nil{
+        send401Unauthorized(w,"Expected valid bearer token.")
+        return
+    }
+    loc := row["loc"]
+    user:= row["userid"]
     var chat authpb.Chat
-    err := json.NewDecoder(r.Body).Decode(&chat)
+    err = json.NewDecoder(r.Body).Decode(&chat)
     if err != nil{
         send400error(w,"Expected json format with keys: Name, IsOpen, IsPhysical, among others. All strings.")
         return
@@ -106,6 +106,7 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
         }
     }
     if members != nil && len(members) != 0{
+        members = append(members,user)
         err := rclient.SetChatMember(chatid, members...)
         if err != nil{
             rgeoclient.RemoveChat(chatid)
@@ -116,8 +117,10 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
         rep.Meta.MsgMime = make(map[string]string)
         rep.Meta.MsgMime["Content-Type"] = "text/plain"
         rep.Meta.Resource = "/chat/"+chatid
-        rep.Msg = []byte("")
-        sendMessageToChatWithMembers(&rep, members)
+        rep.Msg = []byte(chat.Name)
+        sendMessageToChat(chatid,&rep)
+        // avoid calling, because the poster user id might be repeated in members
+        // sendMessageToChatWithMembers(&rep, members)
     }
     // Notify member -> this can be done in a queue to return faster this object
     // Save this message in each member notification list. push and pop notifications.
@@ -175,6 +178,19 @@ type WriteMsg struct {
 }
 
 
+func createGeoMsgId(coorstr string,nanos int32,seconds int64) string{
+    long, lat := mydb.CoorFromString(coorstr)
+    hash := geohash.Encode(lat,long)[0:6]
+    // set message id
+    hasher := sha1.New()
+    hasher.Write([]byte(hash))
+    buf := make([]byte,10)
+    binary.BigEndian.PutUint32(buf, uint32(nanos))
+    hasher.Write(buf)
+    msgid := base64.URLEncoding.EncodeToString(hasher.Sum(nil))[0:7]
+    return hash+"/"+msgid
+}
+
 func createMsgId(strseed string,nanos int32,seconds int64) string{
     // set message id
     hasher := sha1.New()
@@ -186,8 +202,7 @@ func createMsgId(strseed string,nanos int32,seconds int64) string{
     return msgid
 }
 
-
-func replicationChatMessage(chatid string, r *http.Request) (*pb.ReplicationMsg, error){
+func NewReplicationMsgFromRequest(r *http.Request) (*pb.ReplicationMsg, error){
     // Creates a Replication Msg using the headers from the
     // the r request and the chatid information.
     timearrived := ptypes.TimestampNow()
@@ -197,10 +212,7 @@ func replicationChatMessage(chatid string, r *http.Request) (*pb.ReplicationMsg,
     }
     repMsg := new(pb.ReplicationMsg)
     repMsg.Msg = body
-    msgid := createMsgId(chatid,timearrived.Nanos,timearrived.Seconds)
-    resource := fmt.Sprintf("/msg/%s/%s",chatid, msgid)
     repMsg.Meta = new(pb.Metadata)
-    repMsg.Meta.Resource = resource
     repMsg.Meta.Arrived = timearrived
     repMsg.Meta.MsgMime = make(map[string]string)
     repMsg.Meta.MsgMime["Content-Type"] = r.Header.Get("Content-Type")
@@ -217,6 +229,35 @@ func replicationChatMessage(chatid string, r *http.Request) (*pb.ReplicationMsg,
         }
     }
     return repMsg, nil
+}
+
+func replicationChatMessage(chatid string, r *http.Request) (*pb.ReplicationMsg, error){
+    // Creates a Replication Msg using the headers from the
+    // the r request and the chatid information.
+    repMsg, err := NewReplicationMsgFromRequest(r)
+    if err != nil{
+        return nil, err
+    }
+    msgid := createMsgId(chatid,repMsg.Meta.Arrived.Nanos,repMsg.Meta.Arrived.Seconds)
+    resource := fmt.Sprintf("/msg/%s/%s",chatid, msgid)
+    repMsg.Meta.Resource = resource
+    return repMsg, nil
+}
+
+func authenticateRequestPlusRow(r *http.Request) (map[string]string, error){
+    // Most basic OAuth token bearer implementation 
+    // https://tools.ietf.org/html/rfc6750 2.1 Authorization Request Header Field
+    splits := strings.Split(r.Header.Get("Authentication"), " ")
+    if splits==nil  ||  len(splits) == 0{
+        return nil, errors.New("Authentication token not provided")
+    }
+    token := splits[len(splits)-1]
+    row, err := rclient.GetAllFromToken(token)
+    if err != nil{
+        return nil, err
+    }
+    row["token"] = token
+    return row, nil
 }
 
 func authenticateRequest(r *http.Request) (string, error){
@@ -254,7 +295,7 @@ func WriteMsgChatHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     rep.Meta.Poster = user
-    err = sendMessageToChat(chatid,rep)
+    err = sendMessageToChat(chatid,rep) // cuuids are filled in this function
     if err != nil{
         send500error(w)
     }
@@ -263,35 +304,29 @@ func WriteMsgChatHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
-    var incoming WriteMsg
-    decoder := json.NewDecoder(r.Body)
-    decoder.DisallowUnknownFields()
-    err := decoder.Decode(&incoming)
+    row, err := authenticateRequestPlusRow(r)
     if err != nil{
-        log.Print(incoming)
-        send400error(w,"Expected json format with a keys: Token, Message. All strings.")
+        log.Println("Could not authenticate", err)
+        send401Unauthorized(w,"Could not authenticate")
         return
     }
-    cuuid,err :=  rclient.GetCuuidFromToken(incoming.Token)
+    rep, err := NewReplicationMsgFromRequest(r)
     if err != nil{
-        send400error(w,err.Error())
+        log.Println(err)
+        send400error(w, "Message malformed.")
         return
     }
-    // TODO Handle this error: Query broken: Bad connection or sth.
-    ids, err := rgeoclient.QueryNearNeighbourhs(cuuid)
+    rep.Meta.Poster = row["userid"]
+    msgid := createGeoMsgId(row["loc"],rep.Meta.Arrived.Nanos,rep.Meta.Arrived.Seconds)
+    rep.Meta.Resource = "/geochat/"+msgid
+    ids, err := rgeoclient.QueryNearNeighbourhsByCoor(row["loc"])
     if err != nil{
-        log.Printf("Error 111\tcuuid: %s\n\t\t\t|cuuids: %+v\n\t\t\t+err: %s",cuuid, ids, err)
+        log.Print("Error 111",row, ids, err)
         send500error(w)
         return
     }
-    repMsg := &pb.ReplicationMsg{CUuids:ids,Msg: []byte(incoming.Message)}
-    // Filling META
-    repMsg.Meta = &pb.Metadata{Poster:cuuid, Resource: "/msg/[chat-id]/[m-id]", Arrived: ptypes.TimestampNow()}
-    repMsg.Meta.MsgMime = make(map[string]string) // TODO add headers such as content type ...
-    if tp := r.Header.Get("Content-Type"); tp != ""{
-        repMsg.Meta.MsgMime["Content-Type"] = tp
-    }
-    grpcmsgs <- repMsg
+    rep.CUuids =ids
+    grpcmsgs <- rep
 }
 
 func gRPCworker(addr string){
@@ -308,11 +343,17 @@ func gRPCworker(addr string){
     }
     // Responding to incomming grpcmessages to deliver
     for true {
-        repMsg := <-grpcmsgs
+        repMsg, ok := <-grpcmsgs
+        if !ok {
+            log.Print("Error 113: Trying to read from closed channel.")
+            return
+        }
         err = repCall.Send(repMsg)
         if err != nil{
-            log.Print("Error 114")
+            // TODO test chan reput and move to WARNING
+            log.Print("Error 114: Error to receive from connection. Putting message back in the chan")
             log.Print(err)
+            grpcmsgs <- repMsg
             return
         }
         log.Printf("Forwarded message about uuids: %+v",repMsg.CUuids)

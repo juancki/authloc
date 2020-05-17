@@ -3,6 +3,8 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
+	"bytes"
 	"flag"
 	"fmt"
 	"log"
@@ -14,7 +16,6 @@ import (
 
 	// Third party libs
 	"github.com/go-redis/redis/v7"
-	"github.com/golang/protobuf/proto"
 	pb "github.com/juancki/authloc/pb"
 	mydb "github.com/juancki/authloc/dbutils"
 	_ "github.com/lib/pq"
@@ -109,55 +110,65 @@ func main(){
     rclient = nil
     for rclient == nil{
         rclient = mydb.NewRedis(*redis)
-        time.Sleep(time.Second*1)
     }
     rgeoclient = nil
     for rgeoclient == nil{
         rgeoclient  = mydb.NewRedis(*redisGeo)
-        time.Sleep(time.Second*1)
     }
-    event := &pb.Event{}
-    event.Name = "Juan Carlos Gómez Pomar"
-    event.Uuids = 323
-    event.N = -1224
-
-    fmt.Printf("Original: %+v\n", event)
-    bts, err := proto.Marshal(event)
+    chat := &pb.Chat{}
+    chat.Name = "this super name"
+    chat.IsOpen = false
+    chat.Description = "description"
+    chat.Members = make([]string,4)
+    chat.Members[0] = "0"
+    chat.Members[1] = "1"
+    chat.Members[2] = "2"
+    chat.Members[3] = "3"
+    bts, err := json.Marshal(chat)
     if err != nil{
         fmt.Println(err)
         return
     }
-
-    rclient.Redis.Set("key",bts,time.Hour*2)
-
-    time.Sleep(time.Second)
-
-    result := rclient.Redis.Get("key")
-    if result.Err() != nil{
-        fmt.Println(result.Err())
-        return
-    }
-
-    bts2, err := result.Bytes()
+    r, err := http.Post("http://localhost:8000/create/chat", "application/json", bytes.NewBuffer(bts))
     if err != nil{
         fmt.Println(err)
         return
     }
-    event2 := new(pb.Event)
-    err = proto.Unmarshal(bts2,event2)
-    if err != nil{
-        fmt.Println(err)
-        return
-    }
-    fmt.Println(event2)
-
-
-
-    rgeoclient.GeoAddChatCoor("50.50:30.30","werqadsf",event2)
-    rgeoclient.GeoAddChatCoor("50.51:30.30","asdfasdf",event2)
-
-
-
+    fmt.Println(r)
+//     event := &pb.Event{}
+//     event.Name = "Juan Carlos Gómez Pomar"
+//     event.Uuids = 323
+//     event.N = -1224
+// 
+//     fmt.Printf("Original: %+v\n", event)
+//     bts, err := proto.Marshal(event)
+//     if err != nil{
+//         fmt.Println(err)
+//         return
+//     }
+// 
+//     rclient.Redis.Set("key",bts,time.Hour*2)
+// 
+//     time.Sleep(time.Second)
+// 
+//     result := rclient.Redis.Get("key")
+//     if result.Err() != nil{
+//         fmt.Println(result.Err())
+//         return
+//     }
+// 
+//     bts2, err := result.Bytes()
+//     if err != nil{
+//         fmt.Println(err)
+//         return
+//     }
+//     event2 := new(pb.Event)
+//     err = proto.Unmarshal(bts2,event2)
+//     if err != nil{
+//         fmt.Println(err)
+//         return
+//     }
+//     fmt.Println(event2)
 
     fmt.Println("Finished")
 
