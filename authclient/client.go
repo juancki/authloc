@@ -9,7 +9,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-// 	"time"
+
+	// 	"time"
 
 	authpb "github.com/juancki/authloc/pb"
 	wspb "github.com/juancki/wsholder/pb"
@@ -40,6 +41,14 @@ type Person struct {
     Loc string
 }
 
+func getJson(url string, postData []byte, target interface{}) error {
+    // var myClient = &http.Client{Timeout: 10 * time.Second}
+    r, err := http.Post(url, "application/json", bytes.NewBuffer(postData))
+    if err != nil {
+        return err
+    }
+    return json.NewDecoder(r.Body).Decode(target)
+}
 
 func NewClient(urlbase, wSaddr, name, pass, location string) (*Client, error){
     client := new(Client)
@@ -82,7 +91,7 @@ func (mclient *Client) authenticate() (error){
 }
 
 func getNextMessageLength(c net.Conn) (uint64,error){
-    bts := make([]byte,binary.MaxVarintLen64)
+    bts := make([]byte,binary.MaxVarintLen64) // This size should be imported from server lib.
     _, err := c.Read(bts)
     if err != nil{
         return 0, err
@@ -90,62 +99,13 @@ func getNextMessageLength(c net.Conn) (uint64,error){
     return binary.ReadUvarint(bytes.NewReader(bts))
 }
 
-func (mclient *Client) ReceiveMessage() *wspb.UniMsg {
-    if ! mclient.isRecvChanOk {
-        mclient.launchReceiver()
-    }
-    select {
-    case msg, ok:= <-mclient.receiveChannel:
-        if !ok {
-            // No default retry policy
-            mclient.isRecvChanOk = false
-            return nil
-        }
-        return msg
-    default:
-        return nil
-    }
-}
-
-func (mclient *Client) ReceiveMessageChan() <-chan *wspb.UniMsg {
-    if ! mclient.isRecvChanOk {
-        mclient.launchReceiver()
-    }
-    return mclient.receiveChannel
-}
-
-func (mclient *Client) launchReceiver() error {
-    if !mclient.IsAuthenticated(){
-        err := mclient.authenticate()
-        return err
-    }
-    mclient.receiveChannel = make(chan *wspb.UniMsg)
-    go receiveMsgs(mclient.WSaddr, mclient.Token, mclient.receiveChannel)
-    mclient.isRecvChanOk = true
-    return nil
-}
-
-func (mclient *Client) ReceiveWaitMessage() *wspb.UniMsg {
-    if ! mclient.isRecvChanOk {
-        mclient.launchReceiver()
-    }
-    result, ok :=  <-mclient.receiveChannel
-    if !ok {
-        // No default retry policy
-        mclient.isRecvChanOk = false
-        return nil
-    }
-    return result
-}
-func receiveMsgs(ip string, token string, respchan chan<- *wspb.UniMsg){
+func (mclient *Client) receiveMsgs(out chan<- *wspb.UniMsg){
     // Dial
-    defer close(respchan)
-    conn, err := net.Dial("tcp", ip)
-    if err != nil{
-        fmt.Print(err);
-        return
-    }
+    defer close(out)
+    conn, err := net.Dial("tcp", mclient.WSaddr)
+    if err != nil{ fmt.Print(err); return}
     // Send token
+    token := mclient.Token
     sendbytes := make([]byte,len(token)+2)
     sendbytes[0] = ':'
     sendbytes[len(token)+2-1] = '\n'
@@ -153,15 +113,15 @@ func receiveMsgs(ip string, token string, respchan chan<- *wspb.UniMsg){
     writer := bufio.NewWriter(conn)
     writer.WriteString(string(sendbytes))
     writer.Flush()
-    rcv := &wspb.UniMsg{}
-    rcv.Meta = &wspb.Metadata{}
-    rcv.Meta.MsgMime = make(map[string]string)
-
-    for true {
+    for loop:=0; true; loop++ {
+        var rcv wspb.UniMsg // New pointer created each time to avoid issues with slow readers
         length, err := getNextMessageLength(conn)
         if err != nil{
             fmt.Println(err)
             return
+        }
+        if length == 0{
+            continue
         }
         bts := make([]byte,length)
         n, err := conn.Read(bts)
@@ -169,22 +129,19 @@ func receiveMsgs(ip string, token string, respchan chan<- *wspb.UniMsg){
             fmt.Println(err)
             return
         }
-        err = proto.Unmarshal(bts,rcv)
+        err = proto.Unmarshal(bts,&rcv)
         if err != nil{
             fmt.Println(err)
             return
         }
-        respchan <- rcv
-        if rcv == nil || rcv.Meta == nil{
-            continue
-        }
-        // fmt.Print(rcv.GetMeta().Resource, " ", rcv.Meta.Poster)
-        // fmt.Print(rcv.GetMeta().GetMsgMime())
-        // if tpe, ok := rcv.GetMeta().GetMsgMime()["Content-Type"]; ok && tpe != "bytes"{
-        //     fmt.Print(" `",string(rcv.GetMsg()),"`")
-        // }
-        // fmt.Println()
+        out <- &rcv
     }
+}
+
+func (mclient *Client) ReceiveMessageChan() (<-chan *wspb.UniMsg, error) {
+    c := make(chan *wspb.UniMsg)
+    go mclient.receiveMsgs(c)
+    return c, nil
 }
 
 func authPost(token, url, bodyType string, body[]byte)(resp *http.Request, err error) {
@@ -227,7 +184,7 @@ func (mclient *Client) createchat(name string, description string, members []str
     var chat authpb.Chat
     chat.Name = name
     chat.Description = description
-    chat.IsOpen = true
+    chat.IsOpen = false
     chat.Members = members
     chat.More = make(map[string]string)
     bts, err := json.Marshal(&chat)
@@ -245,11 +202,9 @@ func (mclient *Client) createchat(name string, description string, members []str
     var chatresp ChatidResponse
     json.NewDecoder(msg.Body).Decode(&chatresp)
     if mclient.chats == nil{
-        mclient.chats = make([]string,1)
-        mclient.chats[0] = chatresp.Chatid
-    } else {
-        mclient.chats = append(mclient.chats, chatresp.Chatid)
+        mclient.chats = make([]string,0)
     }
+    mclient.chats = append(mclient.chats, chatresp.Chatid)
     return msg.Status, &chatresp, nil
 }
 
@@ -285,11 +240,3 @@ func (mclient *Client) IsAuthenticated()bool {
     }
 }
 
-func getJson(url string, postData []byte, target interface{}) error {
-    // var myClient = &http.Client{Timeout: 10 * time.Second}
-    r, err := http.Post(url, "application/json", bytes.NewBuffer(postData))
-    if err != nil {
-        return err
-    }
-    return json.NewDecoder(r.Body).Decode(target)
-}

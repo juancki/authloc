@@ -36,10 +36,11 @@ func (tclient *TestClient) out(){
         for _, summand := range v{
             s += summand
         }
-        fmt.Printf("%s len:%d sum:%d\n",k,len(v),s)
-
+        fmt.Printf("%s: %s len:%d sum:%d\n",tclient.thisclient,k,len(v),s)
     }
-    fmt.Println(tclient.chatmap)
+    // for key,count := range tclient.chatcount {
+    //     fmt.Printf("%s: %s %d\n",tclient.thisclient,key,count)
+    // }
 }
 
 func sendMessagesToChat(chatid string, mc *TestClient, M int) {
@@ -50,36 +51,40 @@ func sendMessagesToChat(chatid string, mc *TestClient, M int) {
 }
 
 func RegisterIncomingMsg(mc *TestClient) {
-    c := mc.mesaclient.ReceiveMessageChan()
+    c, err := mc.mesaclient.ReceiveMessageChan()
+    if err != nil{
+        panic(err)
+    }
+    loop := 0
     for c != nil{
         rcv, ok := <-c
         if !ok {
             fmt.Println("Channel Closed")
-            c = nil
             return
         }
-        if rcv == nil || rcv.Meta == nil{
+        if rcv == nil{
             continue
         }
-        if rcv.Meta != nil{
-            // fmt.Println(loop,len(rcv.GetMsg()),"B ",rcv.Meta.Resource)
+        if rcv.Meta != nil {
             name := string(rcv.Msg)
             resource := rcv.Meta.Resource
-            if strings.HasPrefix(resource,"/msg/"){ // is a message from client
+            if strings.HasPrefix(resource,"/msg/"){
+                // is a message from client
                 key := name[0:4]+strings.Split(resource,"/")[2]
                 num, _ := strconv.Atoi(name[4:])
                 if _,ok:= mc.chatcount[key]; !ok{
                     mc.chatcount[key] = make([]int,0)
                 }
                 mc.chatcount[key] = append(mc.chatcount[key],num)
-            }else{                          // is a message from chatcreation
+            }else if strings.HasPrefix(resource,"/chat"){ // is a message from chatcreation
                 mc.chatmap[name] = resource
                 chatid := resource[6:]
                 go sendMessagesToChat(chatid, mc, mc.nmessages[name])
             }
         }else{
-            fmt.Println("this should not happen")
+            fmt.Println("Error: All messages that are not nil should have the Meta field.",rcv)
         }
+        loop +=1
     }
 }
 
@@ -90,15 +95,10 @@ func (tclient *TestClient) SetupAndRun(){
     if err != nil{
         panic(err)
     }
-    // Read first message
-    msg := tclient.mesaclient.ReceiveWaitMessage()
-    if msg == nil{
-        panic("AHHH")
-    }
     go RegisterIncomingMsg(tclient)
     time.Sleep(time.Second)
 
-    _, err = tclient.mesaclient.CreateChat(tclient.thischat, "description",tclient.chatmem)
+    _, err = tclient.mesaclient.CreateChat(tclient.thischat, "", tclient.chatmem)
     if err != nil{
         panic(err)
     }
@@ -111,7 +111,6 @@ func main() {
     authloc := flag.String("authloc", "localhost:8000", "address to connect")
 //    name := flag.String("name", "joan", "name to auth")
     pass := flag.String("pass", "joan", "password")
-    usetoken := flag.String("token", "", "Avoid auth and use token")
     location := flag.String("location", "13.13:20.20", "port to connect")
     testN := flag.Int("testN", 4, "Number of clients")
     testM := flag.Int("testM", 1, "Message parameters")
@@ -137,7 +136,7 @@ func main() {
         clt.chatmem = chatMembers
 
         clt.mesaclient = new(authc.Client)
-        clt.mesaclient.Token = *usetoken
+        clt.mesaclient.Token = ""
         clt.mesaclient.WSaddr = *wsholder
         clt.mesaclient.Urlbase = "http://"+*authloc
         clt.mesaclient.Username = clt.thisclient

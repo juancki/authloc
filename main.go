@@ -132,7 +132,7 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
 
 
 
-type Authloc struct{
+type AuthlocRequest struct{
     /* Attributes are req to be
     capitalized to decode on JSON*/
     Name string
@@ -146,7 +146,7 @@ func string2base64(s string) string {
 
 func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
     // check user password from request
-    var body Authloc
+    var body AuthlocRequest
     err := json.NewDecoder(r.Body).Decode(&body)
     if err != nil{
         send400error(w,"Expected json format with keys: Name, Pass, Loc. All strings.")
@@ -329,10 +329,12 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     grpcmsgs <- rep
 }
 
-func gRPCworker(addr string){
+func gRPCworker(addr string, wg *sync.WaitGroup){
+    // TODO Add keep alive
     conn, err := grpc.Dial(addr,grpc.WithInsecure(),grpc.WithBlock())
     c := pb.NewWsBackClient(conn)
-    ctx, cancel := context.WithTimeout(context.Background(), time.Hour)// TODO find a better number for context timeout
+    // TODO find a better number for context timeout
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
     defer cancel()
     defer conn.Close()
     repCall, err := c.Replicate(ctx)
@@ -351,12 +353,14 @@ func gRPCworker(addr string){
         err = repCall.Send(repMsg)
         if err != nil{
             // TODO test chan reput and move to WARNING
-            log.Print("Error 114: Error to receive from connection. Putting message back in the chan")
-            log.Print(err)
+            log.Print("Error 114: Putting message back in the chan")
+            wg.Done() // Free the lock
+            // Writing to a chan is blocking if there is not enough space,
+            // for this reason the wg is freed before
             grpcmsgs <- repMsg
             return
         }
-        log.Printf("Forwarded message about uuids: %+v",repMsg.CUuids)
+        // log.Printf("Forwarded message about uuids: %+v",repMsg.CUuids)
     }
 }
 
@@ -368,9 +372,9 @@ func gRPCmaster(addr string) {
     for true {
         wg.Add(1)
         go func (){
-            gRPCworker(addr)
-            wg.Done()
-        }()
+                log.Println("Launching gRPC worker to: ", addr)
+                gRPCworker(addr,&wg) // wg.Done is called inside to avoid a deadlock
+            }()
         wg.Wait()
     }
 }
@@ -437,7 +441,7 @@ func main(){
 
 
     // Starting server
-    fmt.Println("Starting authlo c...") // ,*frontport,"for front, ",*backport," for back")
+    fmt.Println("Starting authloc ...") // ,*frontport,"for front, ",*backport," for back")
     fmt.Println("--------------------------------------------------------------- ")
 
     router := mux.NewRouter()
