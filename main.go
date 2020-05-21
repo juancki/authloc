@@ -64,6 +64,9 @@ func sendMessageToChatWithMembers(rep *pb.ReplicationMsg, members []string) erro
 
 func sendMessageToChat(chatid string, rep *pb.ReplicationMsg) error {
     members, err := rclient.GetChatMembers(chatid)
+    if len(members) == 0{
+        return nil
+    }
     if err != nil{
         return err
     }
@@ -100,6 +103,7 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     if chat.IsOpen {
         err = rgeoclient.GeoAddChat(loc, chatid)
         if err != nil{
+            log.Println(err, chatid)
             rgeoclient.RemoveChat(chatid)
             send500error(w)
             return
@@ -109,6 +113,7 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
         members = append(members,user)
         err := rclient.SetChatMember(chatid, members...)
         if err != nil{
+            log.Println(err, chatid)
             rgeoclient.RemoveChat(chatid)
             send500error(w)
         }
@@ -130,7 +135,52 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte(out))
 }
 
+type RetrieveChatRequest struct {
+    Chatid string
+    TimeInit string
+    TimeFin string
+}
 
+func RetrieveChatHandler (w http.ResponseWriter, r *http.Request) {
+    _, err := authenticateRequest(r)
+    if err != nil{
+        send401Unauthorized(w,"Expected valid bearer token.")
+        return
+    }
+    var retrv RetrieveChatRequest
+    dec := json.NewDecoder(r.Body)
+    dec.DisallowUnknownFields()
+    err = dec.Decode(&retrv)
+    if err != nil{
+        fmt.Println("json error")
+        send400error(w,"Expected json format with keys: chatid, timeInit, timeFin. All strings.")
+        return
+    }
+    tinit, err1 := time.Parse(time.RFC3339,retrv.TimeInit)
+    tfin, err2 := time.Parse(time.RFC3339,retrv.TimeFin)
+    if err1 != nil || err2 != nil {
+        fmt.Println("time format error")
+        send400error(w,"Expected json time format be in RFC 3339. All strings.")
+        return
+    }
+    c, err := rstore.RetrieveChatMessages(context.TODO(), retrv.Chatid, tinit, tfin)
+    for true {
+        msg, ok := <-c
+        if !ok{
+            log.Println("Error while retrieving stored data.")
+            send500error(w)
+            return
+        }
+        rawWrite(w,msg)
+    }
+}
+
+func rawWrite(w http.ResponseWriter,msg []byte){
+    bts := make([]byte,binary.MaxVarintLen64)
+    binary.PutUvarint(bts,uint64(len(msg)))
+    w.Write(bts)
+    w.Write(msg)
+}
 
 type AuthlocRequest struct{
     /* Attributes are req to be
@@ -169,14 +219,6 @@ func AuthlocHandler(w http.ResponseWriter, r *http.Request) {
 func verifyAuth(Token string, cuuid string){
     // TODO
 }
-
-type WriteMsg struct {
-    Token string
-    Message string
-    // CUUID string
-    Mime map[string]string
-}
-
 
 func createGeoMsgId(coorstr string,nanos int32,seconds int64) string{
     long, lat := mydb.CoorFromString(coorstr)
@@ -297,8 +339,13 @@ func WriteMsgChatHandler(w http.ResponseWriter, r *http.Request) {
     rep.Meta.Poster = user
     err = sendMessageToChat(chatid,rep) // cuuids are filled in this function
     if err != nil{
+        log.Println(err, chatid)
         send500error(w)
     }
+    var s pb.UniMsg
+    s.Msg = rep.Msg
+    s.Meta = rep.Meta
+    rstore.StoreChatMessage(chatid,&s)
     // TODO store message persistently ¿?
     //    var uni pb.UniMsg; uni.Meta = rep.Meta; uni.Msg = rep.Msg;
 }
@@ -327,6 +374,15 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     }
     rep.CUuids =ids
     grpcmsgs <- rep
+    uni := &pb.UniMsg{}
+    uni.Meta = rep.Meta
+    uni.Msg = rep.Msg
+    err = rstore.StoreGeoMessage(row["loc"],uni)
+    if err != nil{
+        log.Print("Error 112",row, ids, err)
+        return
+    }
+
 }
 
 func gRPCworker(addr string, wg *sync.WaitGroup){
@@ -396,6 +452,56 @@ func send401Unauthorized(w http.ResponseWriter,str string){
 }
 
 
+func connectToDBs(pg, red, geo, store string){
+    // Set up Postgre
+    connected := sync.WaitGroup{}
+    pclient = nil
+    connected.Add(1)
+    go func(postgre string){
+        defer connected.Done()
+        pclient = mydb.NewPostgre(postgre)
+        for pclient == nil{
+            time.Sleep(time.Second)
+            pclient = mydb.NewPostgre(postgre)
+        }
+    }(pg)
+    // Set up redis
+    rclient = nil
+    connected.Add(1)
+    go func(redis string){
+        defer connected.Done()
+        rclient = mydb.NewRedis(redis)
+        for rclient == nil{
+            rclient = mydb.NewRedis(redis)
+            time.Sleep(time.Second)
+        }
+    }(red)
+    // Geo redis
+    rgeoclient = nil
+    connected.Add(1)
+    go func(redisGeo string){
+        defer connected.Done()
+        rgeoclient  = mydb.NewRedis(redisGeo)
+        for rgeoclient == nil{
+            rgeoclient  = mydb.NewRedis(redisGeo)
+            time.Sleep(time.Second)
+        }
+    }(geo)
+    // Store
+    rstore = nil
+    connected.Add(1)
+    go func(redisStorgage string){
+        defer connected.Done()
+        rstore = mydb.NewRedis(redisStorgage)
+        for rgeoclient == nil{
+            rgeoclient  = mydb.NewRedis(redisStorgage)
+            time.Sleep(time.Second*1)
+        }
+    }(store)
+    connected.Wait()
+}
+
+var rstore *mydb.Redis
 var rclient *mydb.Redis
 var rgeoclient *mydb.Redis
 var pclient *mydb.Postgre
@@ -405,6 +511,7 @@ func main(){
     port := flag.String("port", "localhost:8000", "port to connect (server)")
     redis:= flag.String("redis", "@localhost:6379/0", "format password@IPAddr:port")
     redisGeo := flag.String("redisGeo", "@localhost:6379/1", "format password@IPAddr:port")
+    redisStorgage := flag.String("rediStore", "@localhost:6379/2", "format password@IPAddr:port")
     postgre := flag.String("postgre", "authloc:Authloc2846@localhost:5432/postgis_db", "user:password@IPAddr:port/dbname")
     grpcSrv := flag.String("grpc", "localhost:8090", "IPv4.addrs:port")
     flag.Parse()
@@ -413,27 +520,12 @@ func main(){
         fport = "localhost:" + *port
     }
 
-    // Set up Postgre
-    pclient = nil
-    for pclient == nil{
-        pclient = mydb.NewPostgre(*postgre)
-    }
+    connectToDBs(*postgre,*redis,*redisGeo,*redisStorgage) 
 
     defer pclient.Pg.Close()
-    // Set up redis
-    rclient = nil
-    rclient = mydb.NewRedis(*redis)
-    for rclient == nil{
-        rclient = mydb.NewRedis(*redis)
-        time.Sleep(time.Second*1)
-    }
-    rgeoclient = nil
-    rgeoclient  = mydb.NewRedis(*redisGeo)
-    for rgeoclient == nil{
-        rgeoclient  = mydb.NewRedis(*redisGeo)
-        time.Sleep(time.Second*1)
-    }
-
+    defer rclient.Redis.Close()
+    defer rgeoclient.Redis.Close()
+    defer rstore.Redis.Close()
 
     // gRPC connection handler
     grpcmsgs = make(chan *pb.ReplicationMsg)
@@ -451,6 +543,7 @@ func main(){
     router.HandleFunc("/writemsg", WriteMsgHandler)
     router.HandleFunc("/write/chat/{chatid}", WriteMsgChatHandler)
     router.HandleFunc("/create/chat", CreateChatHandler)
+    router.HandleFunc("/retrieve/chat", RetrieveChatHandler)
 //    router.HandleFunc("/create/event", CreateEventHandler)
 
     loggedRouter := handlers.LoggingHandler(os.Stdout, router)

@@ -7,8 +7,10 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"time"
 
 	// 	"time"
 
@@ -90,13 +92,67 @@ func (mclient *Client) authenticate() (error){
     return nil
 }
 
-func getNextMessageLength(c net.Conn) (uint64,error){
+func getNextMessageLength(c io.ReadCloser) (uint64,error){
     bts := make([]byte,binary.MaxVarintLen64) // This size should be imported from server lib.
     _, err := c.Read(bts)
     if err != nil{
         return 0, err
     }
     return binary.ReadUvarint(bytes.NewReader(bts))
+}
+
+func (mclient *Client) retrieveMsgs(out chan<- *wspb.UniMsg, r *http.Response){
+    // Dial
+    conn := r.Body
+    defer close(out)
+    for loop:=0; true; loop++ {
+        var rcv wspb.UniMsg // New pointer created each time to avoid issues with slow readers
+        length, err := getNextMessageLength(conn)
+        if err != nil{
+            fmt.Println(err)
+            return
+        }
+        if length == 0{
+            continue
+        }
+        bts := make([]byte,length)
+        n, err := conn.Read(bts)
+        if err != nil || uint64(n) != length{
+            fmt.Println(err)
+            return
+        }
+        err = proto.Unmarshal(bts,&rcv)
+        if err != nil{
+            fmt.Println(err)
+            return
+        }
+        out <- &rcv
+    }
+}
+
+type RetrieveChatRequest struct {
+    Chatid string
+    TimeInit string
+    TimeFin string
+}
+
+func (mclient *Client) RetrieveMessageChan(chatid string, init,fin time.Time) (<-chan *wspb.UniMsg, error) {
+    rcreq := new(RetrieveChatRequest)
+    rcreq.Chatid = chatid
+    rcreq.TimeInit = init.Format(time.RFC3339)
+    rcreq.TimeFin = fin.Format(time.RFC3339)
+    bts, err := json.Marshal(&rcreq)
+    if err!= nil {
+        return nil, err
+    }
+    post, err := authPost(mclient.Token, mclient.Urlbase+"/retrieve/chat", "application/json", bts)
+    if err!= nil {
+        return nil, err
+    }
+    r, err := http.DefaultClient.Do(post)
+    c := make(chan *wspb.UniMsg)
+    go mclient.retrieveMsgs(c, r)
+    return c, nil
 }
 
 func (mclient *Client) receiveMsgs(out chan<- *wspb.UniMsg){

@@ -3,6 +3,7 @@ package main
 
 import (
 	"flag"
+	"time"
 	"fmt"
         authc "github.com/juancki/authloc/authclient"
 
@@ -38,6 +39,7 @@ func main() {
         mesaclient, err = authc.NewClient("http://"+*authloc, *wsholder, *name, *pass, *location)
         if err != nil{
             fmt.Println(err)
+            return
         }
     }else{
         fmt.Println("-token flag passed, avoiding authentication step")
@@ -63,13 +65,28 @@ func main() {
 
     fmt.Println("sending only 10 messages to chat: ",chatid)
     for i:=0;i<10;i++ {
-        msg, err := mesaclient.SendBytesToChat(chatid, []byte(*message), nil)
+        _, err := mesaclient.SendBytesToChat(chatid, []byte(*message), nil)
         if err != nil{
             fmt.Println("Error sending message: ",err)
             return
         }
-        fmt.Println("Message sent:",msg.Status,msg.Header.Get("Content-Type"))
+        // fmt.Println("Message sent:",msg.Status,msg.Header.Get("Content-Type"))
         // time.Sleep(time.Second)
+    }
+
+    fmt.Println("Restore the messages")
+    c, err := mesaclient.RetrieveMessageChan(chatid, time.Now().Add(-time.Hour), time.Now())
+    if err != nil{
+        fmt.Println("Error creating retrieve chan",err)
+        return
+    }
+    for i:=0;i<10;i++ {
+        msg, ok := <-c
+        if !ok{
+            fmt.Println("Retrieve chan closed.")
+            return
+        }
+        fmt.Println("Message rcv:",string(msg.Msg),msg.Meta.MsgMime["Content-Type"])
     }
 }
 

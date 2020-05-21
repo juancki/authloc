@@ -3,8 +3,11 @@ package dbutils
 import (
 	"database/sql"
 	"encoding/base64"
-//	"encoding/binary"
+	"math"
+
+	//	"encoding/binary"
 	"errors"
+	"context"
 	"fmt"
 	"log"
 	"strconv"
@@ -16,7 +19,8 @@ import (
 	redis "github.com/go-redis/redis/v7"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
-//        timestamppb "google.golang.org/protobuf/types/known/timestamppb"
+
+	//        timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	authpb "github.com/juancki/authloc/pb"
 	cPool "github.com/juancki/wsholder/connectionPool"
 	wspb "github.com/juancki/wsholder/pb"
@@ -46,18 +50,154 @@ const(
     USER_TOKEN = "ut:"
     DEFAULT_Q_RADIUS = 10
     DEFAULT_Q_UNIT = "km"
+    MAX_DAYS = 64
+    MAX_HOURS = 24
+    MAX_HOUR_GOUGE = 24*64
 )
 
+func ZERO_TIME () time.Time{
+    return Date(1975,1,1)
+}
+
+var b64chars = [64]rune {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+                      'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+                      'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
+                      'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
+                      'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n',
+                      'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+                      'w', 'x', 'y', 'z', '0', '1', '2', '3',
+                      '4', '5', '6', '7', '8', '9', '+', '/'};
 
 
-func (rclient *Redis) StoreChatMessage(chatid string, uni *wspb.UniMsg) error{
-    time, err := ptypes.Timestamp(uni.Meta.Arrived)
-    daymonth := time.Day() // TODO use time.YearDay() and hour to have slots of 15 min.
+var b64invs = [...]int { 62, -1, -1, -1, 63, 52, 53, 54, 55, 56, 57, 58,
+                        59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4, 5,
+                        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                        21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1, 26, 27, 28,
+                        29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+                        43, 44, 45, 46, 47, 48, 49, 50, 51 };
+
+func hourGougeToTimeWindow(hourGouge uint64) string{
+    day := hourGouge/24
+    b1 := day%64
+    b2 := hourGouge%24
+    r1 := b64chars[b1]
+    r2 := b64chars[b2]
+    return string([]rune{r1,r2})
+}
+
+func timeToHourGouge(t time.Time) uint64{
+    t1 := ZERO_TIME()
+    return uint64(math.Floor(t.Sub(t1).Hours()))
+
+}
+
+func timeWindowToHourGouge(str string) int64{
+    if len(str) != 2{
+        return -1
+    }
+    r1 := rune(str[0])
+    r2 := rune(str[1])
+    if int(r1) -43>= len(b64invs){
+        return -1
+    }
+    if int(r2) -43>= len(b64invs){
+        return -1
+    }
+    days := b64invs[r1-43]
+    hours := b64invs[r2-43]
+    if days == -1 {
+        return -1
+    }
+    if hours == -1 || hours > 23 {
+        return -1
+    }
+    return int64(hours+24*days)
+}
+
+func currentHourGauge() uint64{
+    t1 := ZERO_TIME()
+    h := uint64(math.Floor(time.Now().Sub(t1).Hours()))
+    return h % MAX_HOUR_GOUGE
+}
+
+func timeWindowToTime(str string) (time.Time, time.Time){
+    hg := timeWindowToHourGouge(str)
+    if hg == -1 {
+        panic(fmt.Sprintf("Invalid time window in timeWindowToTime: %s.",str))
+    }
+
+    elapsed := (int64(currentHourGauge())-hg)%MAX_HOUR_GOUGE // always positive
+    elapsed_duration := time.Duration(elapsed)*time.Hour
+    n := time.Now()
+    currentH := time.Date(n.Year(),n.Month(),n.Day(),n.Hour(),0,0,0,time.UTC).Add(-elapsed_duration)
+    return currentH, currentH.Add(time.Hour) // the interval is [init,fin )
+}
+
+
+func Date(year, month, day int) time.Time {
+    return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+}
+
+func getTimeWindows(ctx context.Context, init time.Time, fin time.Time) <-chan string{
+    // Returns two char(golang rune) string
+    c := make(chan string)
+    in := timeToHourGouge(init) // Floor
+    out := timeToHourGouge(fin.Add(time.Hour))
+
+    go func(i uint64, f uint64){
+        defer close(c)
+        for j:=i; j<f; j++ {
+            select {
+            case <-ctx.Done():
+                return
+            default:
+            c  <- hourGougeToTimeWindow(j)
+            }
+        }
+    }(in, out)
+    return c
+}
+
+func getTimeWindow(t time.Time) string {
+    t1 := ZERO_TIME()
+    in := uint64(math.Floor(t.Sub(t1).Hours()))
+    return hourGougeToTimeWindow(in)
+}
+
+func (rclient *Redis) StoreGeoMessage(location string, uni *wspb.UniMsg) error{
+    t, err := ptypes.Timestamp(uni.Meta.Arrived)
+    if err != nil{
+        return err
+    }
+    long, lat := CoorFromString(location)
+    key := getTimeWindow(t) // fmt.Sprintf("%s%s:%s", CHATSTORAGE, dayhour, chatid)
     bts, err := proto.Marshal(uni)
     if err != nil{
         return err
     }
-    key := fmt.Sprintf("%s%s:%d", CHATSTORAGE,chatid,daymonth)
+    base64Text := make([]byte, base64.StdEncoding.EncodedLen(len(bts)))
+    base64.StdEncoding.Encode(base64Text,bts)
+    gloc := &redis.GeoLocation{}
+    gloc.Longitude = long
+    gloc.Latitude = lat
+    gloc.Name = string(base64Text)
+    rclient.Lock()
+    err = rclient.Redis.GeoAdd(key,gloc).Err()
+    rclient.Unlock()
+    if err != nil{
+        return err
+    }
+    return nil
+}
+
+func (rclient *Redis) StoreChatMessage(chatid string, uni *wspb.UniMsg) error{
+    t, err := ptypes.Timestamp(uni.Meta.Arrived)
+    dayhour := getTimeWindow(t)
+    bts, err := proto.Marshal(uni)
+    if err != nil{
+        return err
+    }
+    key := fmt.Sprintf("%s%s:%s", CHATSTORAGE, dayhour, chatid)
     rclient.Lock()
     err = rclient.Redis.LPush(key,bts).Err()
     rclient.Unlock()
@@ -67,42 +207,96 @@ func (rclient *Redis) StoreChatMessage(chatid string, uni *wspb.UniMsg) error{
     return nil
 }
 
-func (rclient *Redis) RetreiveChatMessages(chatid string, start *time.Time, end *time.Time) ([]byte, error) {
-    dayinit := -1
-    dayfin := -1
-    if start != nil{
-        dayinit = start.Day()
+func (rclient *Redis) RetrieveGeoMessages(ctx context.Context, location string, start time.Time, end time.Time) (<-chan []byte, error) {
+    long, lat := CoorFromString(location)
+    if lat == -1  && long == -1 {
+        return nil, errors.New("Bad location string")
     }
-    if  end != nil{
-        dayinit = end.Day()
-    }
-
-    return rclient.queryChatMessages(chatid, dayinit, dayfin)
+    timeWindows := getTimeWindows(ctx, start, end)
+    msgChan := make(chan []byte)
+    go rclient.queryGeoMessages(ctx, long, lat, timeWindows, msgChan)
+    return msgChan, nil
 }
 
-func (rclient *Redis)  queryChatMessages(chatid string, init int, fin int) ([]byte, error){
+func (rclient *Redis)  queryGeoMessages(ctx context.Context, longitude, latitude float64, tws <-chan string,out chan<-[]byte) {
     // optimally this should not be stored in mem but sent to a channel 
-    keypattern := fmt.Sprintf("%s%s:*",CHATSTORAGE,chatid)// TODO Find a query pattern
-    rclient.Lock()
-    req := rclient.Redis.Keys(keypattern)
-    rclient.Unlock()
-    err := req.Err()
-    if err == redis.Nil{
-        return make([]byte,0),nil
-    } else if err != nil {
-        return nil, err
-    }
-    result := make([]byte,0)
-    for _, key := range req.Val() {
-        r := rclient.Redis.LRange(key,0,-1)
-        if r.Err() != nil { // There should be any redis.Nil bc of the previous keys lookup
-            return result, err
+    defer close(out)
+    errcount := 0
+    for tw := range tws {
+        key:= tw
+        select {
+        case <-ctx.Done():
+            log.Println("Context canceled", ctx.Err())
+            return
+        default:
         }
+
+        q := &redis.GeoRadiusQuery{}
+        q.Radius = DEFAULT_Q_RADIUS
+        q.Unit = DEFAULT_Q_UNIT
+        rclient.Lock()
+        r := rclient.Redis.GeoRadius(key,longitude, latitude, q)
+        rclient.Unlock()
+        err := r.Err()
+        if err == redis.Nil {
+            continue
+        } else if err != nil{
+            log.Println("Error while reading from redis:",err)
+            errcount += 1
+            continue
+        }
+        // log.Println("Accessing: ",key,"Received",len(r.Val()),"elements")
         for _, element := range r.Val(){
-            result = append(result,([]byte(element))...)
+            bts := make([]byte, base64.StdEncoding.DecodedLen(len(element.Name)))
+            l, err := base64.StdEncoding.Decode(bts, []byte(element.Name))
+            if err != nil{
+                log.Println("Error while reading from redis:",err)
+                errcount += 1
+                continue
+            }
+            out<- bts[:l]
         }
     }
-    return result,nil
+}
+
+func (rclient *Redis) RetrieveChatMessages(ctx context.Context, chatid string, start time.Time, end time.Time) (<-chan []byte, error) {
+    timeWindows := getTimeWindows(ctx, start, end)
+    msgChan := make(chan []byte)
+    go rclient.queryChatMessages(ctx, chatid, timeWindows, msgChan)
+    return msgChan, nil
+}
+
+
+
+func (rclient *Redis)  queryChatMessages(ctx context.Context, chatid string, tws <-chan string,out chan<-[]byte) {
+    // optimally this should not be stored in mem but sent to a channel 
+    defer close(out)
+    errcount := 0
+    for tw := range tws {
+        key:= fmt.Sprintf("%s%s:%s",CHATSTORAGE,tw,chatid)// TODO Find a query pattern
+        select {
+        case <-ctx.Done():
+            log.Println("Context canceled", ctx.Err())
+            return
+        default:
+        }
+
+        rclient.Lock()
+        r := rclient.Redis.LRange(key,0,-1)
+        rclient.Unlock()
+        err := r.Err()
+        if err == redis.Nil {
+            continue
+        } else if err != nil{
+            log.Println("Error while reading from redis:",err)
+            errcount += 1
+            continue
+        }
+        // log.Println("Accessing: ",key,"Received",len(r.Val()),"elements")
+        for _, element := range r.Val(){
+            out<- []byte(element)
+        }
+    }
 }
 
 
@@ -576,7 +770,6 @@ func NewRedis(connURL string) *Redis{
     connURL = strings.Split(connURL,"/")[0]
 
     pass := strings.Split(connURL,"@")[0]
-    log.Print("`",pass,"`\t",len(pass))
     addr := strings.Split(connURL,"@")[1]
     client := redis.NewClient(&redis.Options{
             Addr:     addr,
