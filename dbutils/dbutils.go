@@ -53,10 +53,12 @@ const(
     MAX_DAYS = 64
     MAX_HOURS = 24
     MAX_HOUR_GOUGE = 24*64
+    TOKEN_TIMEOUT_HOURS = 48 // two days?
+    DEFAULT_TIMEOUT_HOURS = 48 // two days?
 )
 
 func ZERO_TIME () time.Time{
-    return Date(1975,1,1)
+    return time.Date(1975, 1, 1,  0, 0, 0, 0, time.UTC)
 }
 
 var b64chars = [64]rune {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
@@ -115,12 +117,15 @@ func timeWindowToHourGouge(str string) int64{
 }
 
 func currentHourGauge() uint64{
+    // Hour gauge is the same as the Time Windows but represented with an integer
     t1 := ZERO_TIME()
     h := uint64(math.Floor(time.Now().Sub(t1).Hours()))
     return h % MAX_HOUR_GOUGE
 }
 
 func timeWindowToTime(str string) (time.Time, time.Time){
+    // timeWindow : string of two chars that represents clock of 64*24 hours.
+    // Returns the time (hour) range [init,fin) that is represented by the time window.
     hg := timeWindowToHourGouge(str)
     if hg == -1 {
         panic(fmt.Sprintf("Invalid time window in timeWindowToTime: %s.",str))
@@ -133,10 +138,6 @@ func timeWindowToTime(str string) (time.Time, time.Time){
     return currentH, currentH.Add(time.Hour) // the interval is [init,fin )
 }
 
-
-func Date(year, month, day int) time.Time {
-    return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
-}
 
 func getTimeWindows(ctx context.Context, init time.Time, fin time.Time) <-chan string{
     // Returns two char(golang rune) string
@@ -273,7 +274,7 @@ func (rclient *Redis)  queryChatMessages(ctx context.Context, chatid string, tws
     defer close(out)
     errcount := 0
     for tw := range tws {
-        key:= fmt.Sprintf("%s%s:%s",CHATSTORAGE,tw,chatid)// TODO Find a query pattern
+        key:= fmt.Sprintf("%s%s:%s",CHATSTORAGE,tw,chatid)
         select {
         case <-ctx.Done():
             log.Println("Context canceled", ctx.Err())
@@ -319,7 +320,7 @@ func (rclient *Redis) SetChat(chatid string, chat *authpb.Chat) error{
         return err
     }
     rclient.Lock()
-    err = rclient.Redis.Set(CHAT+chatid,bts,time.Hour*2).Err()
+    err = rclient.Redis.Set(CHAT+chatid,bts,time.Hour*DEFAULT_TIMEOUT_HOURS).Err()
     rclient.Unlock()
     if err != nil{
         return err
@@ -347,7 +348,7 @@ func (rclient *Redis) RemoveChat(chatid string) error{
 
 func (rclient *Redis) set(key string, bts []byte) error{
     rclient.Lock()
-    err := rclient.Redis.Set(key, bts,time.Hour*2).Err()
+    err := rclient.Redis.Set(key, bts,time.Hour*DEFAULT_TIMEOUT_HOURS).Err()
     rclient.Unlock()
     if err != nil{
         return err
@@ -410,7 +411,7 @@ func (rclient *Redis) SetUseridCuuid(userid string, cuuid cPool.Uuid) error{
     // For now only one connection (cuuid) for each user.
     bts := cPool.Uuid2Bytes(cuuid)
     rclient.Lock()
-    err := rclient.Redis.Set(USER_CONN+userid, bts, 2*time.Hour).Err()
+    err := rclient.Redis.Set(USER_CONN+userid, bts, time.Hour*DEFAULT_TIMEOUT_HOURS).Err()
     rclient.Unlock()
     if err != nil {
         return err
@@ -419,6 +420,7 @@ func (rclient *Redis) SetUseridCuuid(userid string, cuuid cPool.Uuid) error{
 }
 
 func castMGetUseridToCuuid(mgetval []interface{}, userids []string) ([]cPool.Uuid, error){
+    // Transaltes the result of the MGET redis operation on the user->cuuid
     result := make([]cPool.Uuid,0)
     for ind ,v := range mgetval {
         if v != nil {
@@ -454,6 +456,8 @@ func (rclient *Redis) GetCuuidFromUserid(userids ...string) ([]cPool.Uuid, error
 }
 
 func (rclient *Redis) SetChatMember(chatid string, userid ...string) error {
+    // Creates a Sorted list of members in the chat.
+    // To be make member in chat operations faster
     mem := make([]*redis.Z,len(userid))
     for index, value := range userid{
         mem[index] = &redis.Z{}
@@ -471,25 +475,29 @@ func (rclient *Redis) SetChatMember(chatid string, userid ...string) error {
 
 
 func (rclient *Redis) RemoveChatMember(chatid string, userid string) error {
+    // Removes the memeber from the chat
     memb := &redis.Z{}
     memb.Member = userid
     chatmemberkey := CHATMEMBER + chatid
     rclient.Lock()
     err := rclient.Redis.ZRem(chatmemberkey, memb).Err()
     rclient.Unlock()
-    if err != nil {
-        return err
+    if err == redis.Nil{
+        return nil // userid was not in chatid
+    } else if err != nil {
+        return err // Sth occurred.
     }
     return nil
 }
 
 func (rclient *Redis) RemoveAllChatMembers(chatid string) error {
+    // Remove the chat:member relationship, this removing all members from chat.
     chatmemberkey := CHATMEMBER + chatid
     rclient.Lock()
     err := rclient.Redis.Del(chatmemberkey).Err()
     rclient.Unlock()
     if err == redis.Nil{
-        return nil
+        return nil // The chat:member relationship does not exist for chatid.
     }else if err != nil {
         return err
     }
@@ -497,6 +505,7 @@ func (rclient *Redis) RemoveAllChatMembers(chatid string) error {
 }
 
 func (rclient *Redis) GetChatMembers (chatid string) ([]string, error) {
+    // Returns all the members in the chat.
     chatmemberkey := CHATMEMBER + chatid
     rclient.Lock()
     res := rclient.Redis.ZRange(chatmemberkey,0,-1)
@@ -513,6 +522,7 @@ func (rclient *Redis) GetChatMembers (chatid string) ([]string, error) {
 }
 
 func (rclient *Redis) CheckMemberInChat(chatid string, member string) (bool, error) {
+    // Returns true if member is in chat
     chatmemberkey := CHATMEMBER + chatid
     rclient.Lock()
     res := rclient.Redis.ZScore(chatmemberkey, member)
@@ -527,12 +537,13 @@ func (rclient *Redis) CheckMemberInChat(chatid string, member string) (bool, err
 }
 
 func (rclient *Redis) SetEvent(eventid string, event *authpb.Event) error {
+    // Stores the event in the DB.
     bts, err := proto.Marshal(event)
     if err != nil{
         return err
     }
     rclient.Lock()
-    res := rclient.Redis.Set(eventid, bts, time.Hour*2)
+    res := rclient.Redis.Set(EVENT+eventid, bts, time.Hour*DEFAULT_TIMEOUT_HOURS)
     rclient.Unlock()
     if res.Err() != nil {
         return res.Err()
@@ -541,8 +552,9 @@ func (rclient *Redis) SetEvent(eventid string, event *authpb.Event) error {
 }
 
 func (rclient *Redis) GetEvent(eventid string) (*authpb.Event,error) {
+    // Fetch an event based on its key.
     rclient.Lock()
-    result := rclient.Redis.Get(eventid)
+    result := rclient.Redis.Get(EVENT+eventid)
     rclient.Unlock()
     if result.Err() != nil{
         return nil, result.Err()
@@ -560,6 +572,7 @@ func (rclient *Redis) GetEvent(eventid string) (*authpb.Event,error) {
 }
 
 func (rclient *Redis) Get(key string) (string,error){
+    // Thread safe get operation.
     rclient.Lock()
     val, err := rclient.Redis.Get(key).Result()
     rclient.Unlock()
@@ -574,9 +587,10 @@ func (rclient *Redis) SetToken(token string, name string, loc string) error{
     // autloc   calls SetToken on auth step.
     // wsholder calls AppendCuuidIfExists on ws connection.
     // authloc  calls GetCuuidFromToken to retreive Cuuid. On write messages functions
-    value := fmt.Sprintf("%s:%s:%s:",string2base64(loc),string2base64(name),"timeFormated") // TODO fix time formatting
+    timeFormated := time.Now().Format(time.RFC3339Nano)
+    value := fmt.Sprintf("%s:%s:%s:",string2base64(loc),string2base64(name), string2base64(timeFormated))
     rclient.Lock()
-    err := rclient.Redis.Set(TOKEN_AUTH+token,value,time.Hour*2).Err() // TODO: make it come from config.
+    err := rclient.Redis.Set(TOKEN_AUTH+token,value,time.Hour*TOKEN_TIMEOUT_HOURS).Err()
     rclient.Unlock()
     if err != nil {
         return err
@@ -696,6 +710,8 @@ func (rgeoclient *Redis) QueryNearChats (cuuid string) ([]string, error){
 }
 
 func (rgeoclient *Redis)QueryNearNeighbourhsByCoor(coordinates string) ([]cPool.Uuid, error){
+    // Returns the neighbours' connnections uuids from a coordinate string
+    // Coordinate `longitude:latitude` where both are decimal numbers.
     query := redis.GeoRadiusQuery{}
     query.Radius =  DEFAULT_Q_RADIUS // This radius should be similar to QueryNearNeigh
     query.Unit = DEFAULT_Q_UNIT
@@ -719,6 +735,8 @@ func (rgeoclient *Redis)QueryNearNeighbourhsByCoor(coordinates string) ([]cPool.
     return cuuids, nil
 }
 func (rgeoclient *Redis)QueryNearNeighbourhs (cuuid string) ([]cPool.Uuid, error){
+    // Returns the neighbours' connnections uuids from a previous introduced connection uuid.
+    // Coordinate `longitude:latitude` where both are decimal numbers.
     query := redis.GeoRadiusQuery{}
     query.Radius =  DEFAULT_Q_RADIUS // This radius should be similar to QueryNearNeigh
     query.Unit = DEFAULT_Q_UNIT

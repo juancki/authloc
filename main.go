@@ -31,12 +31,8 @@ import (
 )
 
 // Config
-// TODO add config for the grpc server
-
-// TODO How to develop on both projects at the same time (removing go mod ¿?)
 
 // FEATURES
-// TODO gorutine for the gcrp connection to the client
 // TODO clean the logging
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
@@ -345,9 +341,7 @@ func WriteMsgChatHandler(w http.ResponseWriter, r *http.Request) {
     var s pb.UniMsg
     s.Msg = rep.Msg
     s.Meta = rep.Meta
-    rstore.StoreChatMessage(chatid,&s)
-    // TODO store message persistently ¿?
-    //    var uni pb.UniMsg; uni.Meta = rep.Meta; uni.Msg = rep.Msg;
+    rstore.StoreChatMessage(chatid,&s) // This is a best-effort basis. Otherwise a Q is req.
 }
 
 func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +391,7 @@ func gRPCworker(addr string, wg *sync.WaitGroup){
     if err != nil{
         log.Print("Error 112")
         log.Print(err)
+        wg.Done() // Free the lock
         return
     }
     // Responding to incomming grpcmessages to deliver
@@ -404,11 +399,11 @@ func gRPCworker(addr string, wg *sync.WaitGroup){
         repMsg, ok := <-grpcmsgs
         if !ok {
             log.Print("Error 113: Trying to read from closed channel.")
+            wg.Done() // Free the lock
             return
         }
         err = repCall.Send(repMsg)
         if err != nil{
-            // TODO test chan reput and move to WARNING
             log.Print("Error 114: Putting message back in the chan")
             wg.Done() // Free the lock
             // Writing to a chan is blocking if there is not enough space,
