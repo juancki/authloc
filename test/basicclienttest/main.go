@@ -52,6 +52,16 @@ func main() {
     fmt.Println("Token: ", mesaclient.Token)
     go PleaeReceiveMsgs(mesaclient)
 
+    for j:=0;j<10;j++{
+        resp, err := mesaclient.SendBytesToGeoChat([]byte(*message),nil)
+        if err != nil{
+            fmt.Println("Error sending geo message: ",err)
+            return
+        }
+        fmt.Println("Geo Message sent:",resp.Status,resp.Header.Get("Content-Type"))
+    }
+
+
     chatid := *chatidflag
     if len(*chatidflag)==0{
         chat, err := mesaclient.CreateChat("This chat", "description", nil)

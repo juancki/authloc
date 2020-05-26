@@ -69,6 +69,20 @@ func sendMessageToChat(chatid string, rep *pb.ReplicationMsg) error {
     return sendMessageToChatWithMembers(rep, members)
 }
 
+func stringSet(in []string) []string {
+    // returns list without duplicates
+    set := make(map[string]bool)
+    for _, member := range in{
+        set[member] = true
+    }
+    out := make([]string,len(set))
+    ind := 0
+    for key := range set{
+        out[ind] = key
+        ind += 1
+    }
+    return out
+}
 
 func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     row, err := authenticateRequestPlusRow(r)
@@ -107,6 +121,7 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     }
     if members != nil && len(members) != 0{
         members = append(members,user)
+        members = stringSet(members)
         err := rclient.SetChatMember(chatid, members...)
         if err != nil{
             log.Println(err, chatid)
@@ -129,6 +144,56 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Add("Content-Type", "application/json")
     out:= fmt.Sprintf("{ \"chatid\": \"%s\"}",chatid)
     w.Write([]byte(out))
+}
+
+func rawWrite(w http.ResponseWriter,msg []byte){
+    bts := make([]byte,binary.MaxVarintLen64)
+    binary.PutUvarint(bts,uint64(len(msg)))
+    w.Write(bts)
+    w.Write(msg)
+}
+
+type RetrieveGeoRequest struct {
+    Location string
+    TimeInit string
+    TimeFin string
+}
+
+func RetrieveGeoHandler(w http.ResponseWriter, r *http.Request) {
+    row, err := authenticateRequestPlusRow(r)
+    if err != nil{
+        send401Unauthorized(w,"Expected valid bearer token.")
+        return
+    }
+    var retrv RetrieveGeoRequest
+    dec := json.NewDecoder(r.Body)
+    dec.DisallowUnknownFields()
+    err = dec.Decode(&retrv)
+    if err != nil{
+        fmt.Println("json error")
+        send400error(w,"Expected json format with keys: chatid, timeInit, timeFin. All strings.")
+        return
+    }
+    loc := retrv.Location
+    if retrv.Location == ""{
+        loc = row["loc"]
+    }
+    tinit, err1 := time.Parse(time.RFC3339,retrv.TimeInit)
+    tfin, err2 := time.Parse(time.RFC3339,retrv.TimeFin)
+    if err1 != nil || err2 != nil {
+        fmt.Println("time format error")
+        send400error(w,"Expected json time format be in RFC 3339. All strings.")
+        return
+    }
+    c, err := rstore.RetrieveGeoMessages(context.TODO(), loc, tinit, tfin)
+    for {
+        msg, ok := <-c
+        if !ok{
+            // Channel closed
+            return
+        }
+        rawWrite(w,msg)
+    }
 }
 
 type RetrieveChatRequest struct {
@@ -160,23 +225,18 @@ func RetrieveChatHandler (w http.ResponseWriter, r *http.Request) {
         return
     }
     c, err := rstore.RetrieveChatMessages(context.TODO(), retrv.Chatid, tinit, tfin)
+    count := 0
     for true {
         msg, ok := <-c
-        if !ok{
-            log.Println("Error while retrieving stored data.")
-            send500error(w)
+        if !ok{ // Channel closed
             return
         }
         rawWrite(w,msg)
+        log.Println("H",count)
+        count += 1
     }
 }
 
-func rawWrite(w http.ResponseWriter,msg []byte){
-    bts := make([]byte,binary.MaxVarintLen64)
-    binary.PutUvarint(bts,uint64(len(msg)))
-    w.Write(bts)
-    w.Write(msg)
-}
 
 type AuthlocRequest struct{
     /* Attributes are req to be
@@ -539,6 +599,7 @@ func main(){
     router.HandleFunc("/write/chat/{chatid}", WriteMsgChatHandler)
     router.HandleFunc("/create/chat", CreateChatHandler)
     router.HandleFunc("/retrieve/chat", RetrieveChatHandler)
+    router.HandleFunc("/retrieve/geochat", RetrieveGeoHandler)
 //    router.HandleFunc("/create/event", CreateEventHandler)
 
     loggedRouter := handlers.LoggingHandler(os.Stdout, router)

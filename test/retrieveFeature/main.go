@@ -10,16 +10,55 @@ import (
 )
 
 func PleaeReceiveMsgs(mesaclient *authc.Client) {
+    count := 0
+    defer fmt.Println("Total number of received  messages:", count)
     c, _ := mesaclient.ReceiveMessageChan()
     for {
-        msg, ok := <-c
+        _, ok := <-c
         if !ok{
             return
         }
-        fmt.Println(msg)
+        count += 1
     }
 }
 
+
+
+func retrieveFromChat(mesaclient *authc.Client, chatidflag, message *string){
+    chatid := *chatidflag
+    if len(*chatidflag)==0{
+        chat, err := mesaclient.CreateChat("This chat", "description", nil)
+        fmt.Println("chat:", chat, "err:",err)
+        chatid = chat.Chatid
+    }else {
+        fmt.Println("-chat flag passed, avoiding chat creation step")
+    }
+    fmt.Println("sending only 10 messages to chat: ",chatid)
+    for i:=0;i<10;i++ {
+        pre := (fmt.Sprintf("CHAT:%d:",i))
+        _, err := mesaclient.SendBytesToChat(chatid, []byte(pre+*message), nil)
+        if err != nil{
+            fmt.Println("Error sending message: ",err)
+            return
+        }
+        // fmt.Println("Message sent:",msg.Status,msg.Header.Get("Content-Type"))
+        // time.Sleep(time.Second)
+    }
+    fmt.Println("Restore the messages")
+    c, err := mesaclient.RetrieveMessageChan(chatid, time.Now().Add(-time.Hour), time.Now())
+    if err != nil{
+        fmt.Println("Error creating retrieve chan",err)
+        return
+    }
+    for {
+        msg, ok := <-c
+        if !ok{
+            fmt.Println("Retrieve chan closed.")
+            return
+        }
+        fmt.Println("Message rcv:",string(msg.Msg),msg.Meta.MsgMime["Content-Type"])
+    }
+}
 
 
 func main() {
@@ -38,6 +77,7 @@ func main() {
     if len(*usetoken)==0{
         mesaclient, err = authc.NewClient("http://"+*authloc, *wsholder, *name, *pass, *location)
         if err != nil{
+            fmt.Println(*chatidflag)
             fmt.Println(err)
             return
         }
@@ -53,19 +93,16 @@ func main() {
     }
     fmt.Println("Token: ", mesaclient.Token)
     go PleaeReceiveMsgs(mesaclient)
+    retrieveFromChat(mesaclient,chatidflag,message)
+    retrieveFromGeo(mesaclient,message)
 
-    chatid := *chatidflag
-    if len(*chatidflag)==0{
-        chat, err := mesaclient.CreateChat("This chat", "description", nil)
-        fmt.Println("chat:", chat, "err:",err)
-        chatid = chat.Chatid
-    }else {
-        fmt.Println("-chat flag passed, avoiding chat creation step")
-    }
+}
 
-    fmt.Println("sending only 10 messages to chat: ",chatid)
+func retrieveFromGeo(mesaclient *authc.Client, message *string){
+    fmt.Println("sending only 10 messages to geo chat")
     for i:=0;i<10;i++ {
-        _, err := mesaclient.SendBytesToChat(chatid, []byte(*message), nil)
+        pre := (fmt.Sprintf("GEO:%d:",i))
+        _, err := mesaclient.SendBytesToGeoChat([]byte(pre+*message), nil)
         if err != nil{
             fmt.Println("Error sending message: ",err)
             return
@@ -73,20 +110,14 @@ func main() {
         // fmt.Println("Message sent:",msg.Status,msg.Header.Get("Content-Type"))
         // time.Sleep(time.Second)
     }
-
-    fmt.Println("Restore the messages")
-    c, err := mesaclient.RetrieveMessageChan(chatid, time.Now().Add(-time.Hour), time.Now())
+    fmt.Println("Restore the geo messages")
+    c, err := mesaclient.RetrieveGeoChan(time.Now().Add(-time.Hour), time.Now())
     if err != nil{
         fmt.Println("Error creating retrieve chan",err)
         return
     }
-    for i:=0;i<10;i++ {
-        msg, ok := <-c
-        if !ok{
-            fmt.Println("Retrieve chan closed.")
-            return
-        }
+    for msg := range c {
         fmt.Println("Message rcv:",string(msg.Msg),msg.Meta.MsgMime["Content-Type"])
     }
+    fmt.Println("Retrieve chan closed.")
 }
-

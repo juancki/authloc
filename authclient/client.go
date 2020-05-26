@@ -108,26 +108,53 @@ func (mclient *Client) retrieveMsgs(out chan<- *wspb.UniMsg, r *http.Response){
     for loop:=0; true; loop++ {
         var rcv wspb.UniMsg // New pointer created each time to avoid issues with slow readers
         length, err := getNextMessageLength(conn)
-        if err != nil{
-            fmt.Println(err)
+        if err != io.EOF {
+            return
+        }else if err != nil {
+            fmt.Println("Connection error:", err)
             return
         }
-        if length == 0{
+        if length == 0 {
             continue
         }
         bts := make([]byte,length)
         n, err := conn.Read(bts)
-        if err != nil || uint64(n) != length{
-            fmt.Println(err)
+        if  uint64(n) != length{
+            fmt.Println("Connection error: expected to read",length, "B. Read:",n)
             return
         }
         err = proto.Unmarshal(bts,&rcv)
         if err != nil{
-            fmt.Println(err)
+            fmt.Println("Unable to unmarshal:",err)
             return
         }
         out <- &rcv
     }
+}
+
+type RetrieveGeoRequest struct {
+    Location string
+    TimeInit string
+    TimeFin string
+}
+
+func (mclient *Client) RetrieveGeoChan(init,fin time.Time) (<-chan *wspb.UniMsg, error) {
+    rcreq := new(RetrieveGeoRequest)
+    rcreq.Location = mclient.Location
+    rcreq.TimeInit = init.Format(time.RFC3339)
+    rcreq.TimeFin = fin.Format(time.RFC3339)
+    bts, err := json.Marshal(&rcreq)
+    if err!= nil {
+        return nil, err
+    }
+    post, err := authPost(mclient.Token, mclient.Urlbase+"/retrieve/geochat", "application/json", bts)
+    if err!= nil {
+        return nil, err
+    }
+    r, err := http.DefaultClient.Do(post)
+    c := make(chan *wspb.UniMsg)
+    go mclient.retrieveMsgs(c, r)
+    return c, nil
 }
 
 type RetrieveChatRequest struct {
@@ -268,6 +295,18 @@ func (mclient *Client) sendmsgtochat(chatid string, message []byte) (*http.Respo
     return mclient.sendmsgtochatheaders(chatid,message,nil)
 }
 
+func (mclient *Client) sendgeomsgheaders(message []byte,headers map[string]string) (*http.Response, error){
+    sendurl := mclient.Urlbase+"/writemsg"
+    r, _ := authPost(mclient.Token,sendurl, "text/plain", message)
+    r.Header.Add("WS-META","META")
+    r.Header.Add("Content-Type","text/plain")
+    for k,v := range headers{
+        r.Header.Add(k,v)
+    }
+    client := new(http.Client)
+    return client.Do(r)
+}
+
 func (mclient *Client) sendmsgtochatheaders(chatid string, message []byte,headers map[string]string) (*http.Response, error){
     sendurl := mclient.Urlbase+"/write/chat/"+chatid
     r, _ := authPost(mclient.Token,sendurl, "text/plain", message)
@@ -279,6 +318,16 @@ func (mclient *Client) sendmsgtochatheaders(chatid string, message []byte,header
     client := new(http.Client)
     return client.Do(r)
 }
+
+func (mclient *Client) SendBytesToGeoChat(message []byte, headers map[string]string)(*http.Response, error){
+    // mclient.SendBytesToChat(chatid, message, nil)
+    // mclient.SendBytesToChat(chatid, message, headers)
+    if !mclient.IsAuthenticated(){
+        mclient.authenticate()
+    }
+    return mclient.sendgeomsgheaders(message,headers)
+}
+
 func (mclient *Client) SendBytesToChat(chatid string, message []byte, headers map[string]string)(*http.Response, error){
     // mclient.SendBytesToChat(chatid, message, nil)
     // mclient.SendBytesToChat(chatid, message, headers)

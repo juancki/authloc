@@ -11,12 +11,12 @@ message Chat {
     string Name = 1;
     bool IsOpen = 2;
     string Description = 3;
-    string Tags = 4;
+    repeated string Tags = 4;
     map<string,string> More = 6;
     repeated string Members = 8;
-    google.protobuf.Timestamp Creation=9;
+    google.protobuf.Timestamp Creation = 9;
     string Creator = 10;
-    string FromMessage = 11;
+    string FromEvent = 11;
 }
 
 
@@ -24,11 +24,14 @@ message Event{
     string Name = 1;
     bool IsOpen = 2;
     string Description = 3;
-    string Tags = 4;
-    bool IsPhysical = 5;
+    repeated string Tags = 4;
     map<string,string> More = 6;
-    OnlineMeet Online = 10; // online
+    repeated string Members = 8;
+    google.protobuf.Timestamp Creation = 9;
+    string Creator = 10;
+    string Chat = 12;
     PhysicalMeet Physical = 20; // in person
+    OnlineMeet Online = 30; // online
 }
 
 message OnlineMeet {

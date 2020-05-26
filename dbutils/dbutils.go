@@ -45,6 +45,7 @@ const(
     EVENT = "e:"
     CHAT = "c:"
     CHATSTORAGE = "cs:"
+    GEOSTORAGE = "gs:"
     TOKEN_AUTH = "ta:"
     USER_CONN = "uc:"
     USER_TOKEN = "ut:"
@@ -171,7 +172,7 @@ func (rclient *Redis) StoreGeoMessage(location string, uni *wspb.UniMsg) error{
         return err
     }
     long, lat := CoorFromString(location)
-    key := getTimeWindow(t) // fmt.Sprintf("%s%s:%s", CHATSTORAGE, dayhour, chatid)
+    key := GEOSTORAGE+getTimeWindow(t) // fmt.Sprintf("%s%s:%s", CHATSTORAGE, dayhour, chatid)
     bts, err := proto.Marshal(uni)
     if err != nil{
         return err
@@ -208,23 +209,12 @@ func (rclient *Redis) StoreChatMessage(chatid string, uni *wspb.UniMsg) error{
     return nil
 }
 
-func (rclient *Redis) RetrieveGeoMessages(ctx context.Context, location string, start time.Time, end time.Time) (<-chan []byte, error) {
-    long, lat := CoorFromString(location)
-    if lat == -1  && long == -1 {
-        return nil, errors.New("Bad location string")
-    }
-    timeWindows := getTimeWindows(ctx, start, end)
-    msgChan := make(chan []byte)
-    go rclient.queryGeoMessages(ctx, long, lat, timeWindows, msgChan)
-    return msgChan, nil
-}
 
 func (rclient *Redis)  queryGeoMessages(ctx context.Context, longitude, latitude float64, tws <-chan string,out chan<-[]byte) {
-    // optimally this should not be stored in mem but sent to a channel 
     defer close(out)
     errcount := 0
     for tw := range tws {
-        key:= tw
+        key:= GEOSTORAGE+tw
         select {
         case <-ctx.Done():
             log.Println("Context canceled", ctx.Err())
@@ -246,9 +236,8 @@ func (rclient *Redis)  queryGeoMessages(ctx context.Context, longitude, latitude
             errcount += 1
             continue
         }
-        // log.Println("Accessing: ",key,"Received",len(r.Val()),"elements")
         for _, element := range r.Val(){
-            bts := make([]byte, base64.StdEncoding.DecodedLen(len(element.Name)))
+            bts := make([]byte, base64.StdEncoding.DecodedLen(len(element.Name))) // TODO avoid creating a new array each time.
             l, err := base64.StdEncoding.Decode(bts, []byte(element.Name))
             if err != nil{
                 log.Println("Error while reading from redis:",err)
@@ -258,6 +247,17 @@ func (rclient *Redis)  queryGeoMessages(ctx context.Context, longitude, latitude
             out<- bts[:l]
         }
     }
+}
+
+func (rclient *Redis) RetrieveGeoMessages(ctx context.Context, location string, start time.Time, end time.Time) (<-chan []byte, error) {
+    long, lat := CoorFromString(location)
+    if lat == -1  && long == -1 {
+        return nil, errors.New("Bad location string")
+    }
+    timeWindows := getTimeWindows(ctx, start, end)
+    msgChan := make(chan []byte)
+    go rclient.queryGeoMessages(ctx, long, lat, timeWindows, msgChan)
+    return msgChan, nil
 }
 
 func (rclient *Redis) RetrieveChatMessages(ctx context.Context, chatid string, start time.Time, end time.Time) (<-chan []byte, error) {
@@ -772,7 +772,7 @@ type Redis struct{
 
 
 type Postgre struct{
-    Pg sql.DB
+    Pg *sql.DB
     sync.Mutex
 }
 
@@ -827,9 +827,10 @@ func NewPostgre(connURL string) *Postgre{
     db, err := sql.Open("postgres", psqlInfo)
     if err != nil{
         log.Fatal("Un able to connect to POSTGRE with ", psqlInfo)
+        return nil
     }
     log.Print("Connected to Postgre!")// with, ",psqlInfo)
-    return &Postgre{Pg: *db}
-
+    p := &Postgre{Pg: db}
+    return p
 }
 
