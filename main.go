@@ -6,26 +6,27 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"errors"
 	"strings"
 	"sync"
 	"time"
 
 	// Third party libs
+	"github.com/go-redis/redis"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-	pb "github.com/juancki/wsholder/pb"
-	authpb "github.com/juancki/authloc/pb"
-	geohash "github.com/mmcloughlin/geohash"
 	mydb "github.com/juancki/authloc/dbutils"
+	authpb "github.com/juancki/authloc/pb"
+	pb "github.com/juancki/wsholder/pb"
 	_ "github.com/lib/pq"
+	geohash "github.com/mmcloughlin/geohash"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -525,7 +526,48 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         log.Print("Error 112",row, ids, err)
         return
     }
+}
 
+func GetEventHandler(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    eventid, ok := vars["eventid"]
+    if !ok{
+        send400error(w,"`/event/{eventid}` expected.")
+        return
+    }
+    event, err := rclient.GetEvent(eventid)
+    if err == redis.Nil {
+        send404error(w, "Event with id:"+eventid+" was not found")
+        return
+    }
+    bts, err := json.Marshal(event)
+    if err != nil {
+        send500error(w)
+        return
+    }
+    w.Header().Add("Content-Type","application/json")
+    w.Write(bts)
+}
+
+func GetChatHandler(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    chatid, ok := vars["chatid"]
+    if !ok{
+        send400error(w,"`/chat/{chatid}` expected.")
+        return
+    }
+    chat, err := rclient.GetChat(chatid)
+    if err == redis.Nil {
+        send404error(w, "Chat with id:"+chatid+" was not found")
+        return
+    }
+    bts, err := json.Marshal(chat)
+    if err != nil {
+        send500error(w)
+        return
+    }
+    w.Header().Add("Content-Type","application/json")
+    w.Write(bts)
 }
 
 func gRPCworker(addr string, wg *sync.WaitGroup){
@@ -587,6 +629,11 @@ func send500error(w http.ResponseWriter){
 
 func send400error(w http.ResponseWriter,str string){
     w.WriteHeader(http.StatusBadRequest)
+    w.Write([]byte(str))
+}
+
+func send404error(w http.ResponseWriter,str string){
+    w.WriteHeader(http.StatusNotFound)
     w.Write([]byte(str))
 }
 
@@ -687,9 +734,11 @@ func main(){
     router.HandleFunc("/writemsg", WriteMsgHandler) // GeoWriteMsg
     router.HandleFunc("/write/chat/{chatid}", WriteMsgChatHandler)
     router.HandleFunc("/create/chat", CreateChatHandler)
+    router.HandleFunc("/create/event", CreateEventHandler)
+    router.HandleFunc("/event/{eventid}", GetEventHandler)
+    router.HandleFunc("/chat/{chatid}", GetChatHandler)
     router.HandleFunc("/retrieve/chat", RetrieveChatHandler)
     router.HandleFunc("/retrieve/geochat", RetrieveGeoHandler)
-    router.HandleFunc("/create/event", CreateEventHandler)
 
     loggedRouter := handlers.LoggingHandler(os.Stdout, router)
 

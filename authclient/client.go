@@ -239,6 +239,15 @@ func authPost(token, url, bodyType string, body[]byte)(resp *http.Request, err e
     return post, nil
 }
 
+func authGet(token, url, bodyType string, body[]byte) (resp *http.Request, err error) {
+    get, err := http.NewRequest("GET", url, bytes.NewBuffer(body))
+    if err != nil {
+        return nil, err
+    }
+    get.Header.Add("Authentication","bearer "+token)
+    return get, nil
+}
+
 func post(url string, bodyType string, body []byte) (resp *http.Request, err error) {
     req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
     if err != nil {
@@ -291,6 +300,25 @@ func (mclient *Client) createevent(name string, description string, members []st
     return msg.Status, &eventresp, nil
 }
 
+func (mclient *Client) GetEvent(eventid string) (*authpb.Event, error){
+    url := mclient.Urlbase + "/event/"+eventid
+    r, err := authGet(mclient.Token, url, "application/json", nil)
+    if err != nil{
+        return nil, err
+    }
+    msg, err := http.DefaultClient.Do(r)
+    if err != nil{
+        return nil, err
+    }
+    var event authpb.Event
+    json.NewDecoder(msg.Body).Decode(&event)
+    if mclient.events == nil{
+        mclient.events = make([]string,0)
+    }
+    mclient.events = append(mclient.events, eventid)
+    return &event, nil
+}
+
 func (mclient *Client) CreateEvent(name, description string, members[]string)(*EventidResponse, error){
     if !mclient.IsAuthenticated(){
         mclient.authenticate()
@@ -303,13 +331,31 @@ type ChatidResponse struct {
     Chatid string `json:"chatid"`
 }
 
+func (mclient *Client) GetChat(chatid string) (*authpb.Chat, error){
+    url := mclient.Urlbase + "/chat/"+chatid
+    r, err := authGet(mclient.Token, url, "application/json", nil)
+    if err != nil{
+        return nil, err
+    }
+    msg, err := http.DefaultClient.Do(r)
+    if err != nil{
+        return nil, err
+    }
+    var chat authpb.Chat
+    json.NewDecoder(msg.Body).Decode(&chat)
+    if mclient.chats == nil{
+        mclient.chats = make([]string,0)
+    }
+    mclient.chats = append(mclient.chats, chatid)
+    return &chat, nil
+}
+
 func (mclient *Client) CreateChat(name, description string, members[]string)(*ChatidResponse , error){
     if !mclient.IsAuthenticated(){
         mclient.authenticate()
     }
     _, crep, err:= mclient.createchat(name, description, members)
     return crep,err
-
 }
 
 func (mclient *Client) createchat(name string, description string, members []string) (string, *ChatidResponse , error){
