@@ -27,6 +27,19 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// TODO Connection pooling for redis
+//      Select the connection based on the element to be accessed (geo vs normal vs storage)
+
+// TODO Create user profiles
+
+// TODO Add methods for the PosgreSQL 
+// TODO Consider creating a PosgreSQL+DjangoRest for updating Events/Chats/Profiles...
+//      Then, use Redis a caching ...
+
+// TODO GeoRetrieve in Time order and with time constraints
+
+// TODO ChaRetrieve with time Constraints
+
 func string2base64(s string) string {
     return base64.StdEncoding.EncodeToString([]byte(s))
 }

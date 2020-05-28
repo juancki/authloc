@@ -1,4 +1,8 @@
 // Package main implements a client for Greeter service.
+// TODO Generate random location for users
+// TODO Test failed or passed situation
+// TODO GET CREATE and WRITE To Chat, Event, Profile
+
 package main
 
 import (

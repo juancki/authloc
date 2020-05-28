@@ -35,7 +35,13 @@ import (
 // Config
 
 // FEATURES
-// TODO clean the logging
+// TODO Create user profiles
+
+// TODO /singup, /login, /logout ,... OAuth
+
+// TODO distributed systems.
+//      On new wsholders auto connect.
+//      Batch messages to the corresponsing wsholders based on CUUID
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
     fmt.Fprintf(w,"Hello, World Home page")
