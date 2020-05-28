@@ -32,6 +32,7 @@ type Client struct {
     Password string
     Location string
     chats []string
+    events []string
     isRecvChanOk bool
     receiveChannel chan *wspb.UniMsg
     // Username, pass, ...
@@ -98,7 +99,8 @@ func getNextMessageLength(c io.ReadCloser) (uint64,error){
     if err != nil{
         return 0, err
     }
-    return binary.ReadUvarint(bytes.NewReader(bts))
+    num, _ := binary.ReadUvarint(bytes.NewReader(bts))
+    return num, nil
 }
 
 func (mclient *Client) retrieveMsgs(out chan<- *wspb.UniMsg, r *http.Response){
@@ -108,7 +110,7 @@ func (mclient *Client) retrieveMsgs(out chan<- *wspb.UniMsg, r *http.Response){
     for loop:=0; true; loop++ {
         var rcv wspb.UniMsg // New pointer created each time to avoid issues with slow readers
         length, err := getNextMessageLength(conn)
-        if err != io.EOF {
+        if err == io.EOF {
             return
         }else if err != nil {
             fmt.Println("Connection error:", err)
@@ -248,6 +250,53 @@ func post(url string, bodyType string, body []byte) (resp *http.Request, err err
 
 type OkResponse struct {
     Ok string
+}
+
+type EventidResponse struct {
+    Eventid string `json:"eventid"`
+    Chatid string `json:"chatid"`
+}
+
+func NewEvent(name, description string, members []string) (*authpb.Event){
+    var event authpb.Event
+    event.Name = name
+    event.Description = description
+    event.IsOpen = false
+    event.Members = members
+    event.More = make(map[string]string)
+
+    return &event
+}
+
+func (mclient *Client) createevent(name string, description string, members []string) (string, *EventidResponse, error){
+    event := NewEvent(name, description, members)
+    bts, err := json.Marshal(event)
+    if err != nil{ return "", nil, err}
+
+    url :=  mclient.Urlbase +"/create/event"
+    r, err := authPost(mclient.Token,url, "application/json", bts)
+    if err != nil{
+        return "", nil, err
+    }
+    msg, err := http.DefaultClient.Do(r)
+    if err != nil{
+        return "", nil, err
+    }
+    var eventresp EventidResponse
+    json.NewDecoder(msg.Body).Decode(&eventresp)
+    if mclient.events == nil{
+        mclient.events = make([]string,0)
+    }
+    mclient.events = append(mclient.events, eventresp.Eventid)
+    return msg.Status, &eventresp, nil
+}
+
+func (mclient *Client) CreateEvent(name, description string, members[]string)(*EventidResponse, error){
+    if !mclient.IsAuthenticated(){
+        mclient.authenticate()
+    }
+    _, crep, err:= mclient.createevent(name, description, members)
+    return crep,err
 }
 
 type ChatidResponse struct {

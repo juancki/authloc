@@ -11,7 +11,7 @@ import (
 
 func PleaeReceiveMsgs(mesaclient *authc.Client) {
     count := 0
-    defer fmt.Println("Total number of received  messages:", count)
+    defer fmt.Println("Total number of received  messages on downlink:", count)
     c, _ := mesaclient.ReceiveMessageChan()
     for {
         _, ok := <-c
@@ -116,8 +116,11 @@ func retrieveFromGeo(mesaclient *authc.Client, message *string){
         fmt.Println("Error creating retrieve chan",err)
         return
     }
+    count:= 0
     for msg := range c {
         fmt.Println("Message rcv:",string(msg.Msg),msg.Meta.MsgMime["Content-Type"])
+        count ++
     }
+    fmt.Println("Received", count, "messages.")
     fmt.Println("Retrieve chan closed.")
 }

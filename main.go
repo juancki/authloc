@@ -1,6 +1,7 @@
 
 package main
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -84,6 +85,39 @@ func stringSet(in []string) []string {
     return out
 }
 
+
+func StoreAndForwardChat(chatid string, chat *authpb.Chat) error {
+    members := chat.Members
+    chat.Members = nil // TODO this changes the pointer of chat.Memebers
+    err := rclient.SetChat(chatid, chat)
+    if chat.IsOpen {
+        loc := chat.More["Created-At-Location"]
+        err = rgeoclient.GeoAddChat(loc, chatid)
+        if err != nil{
+            rgeoclient.RemoveChat(chatid)
+            return err
+        }
+        // Broadcast
+    }
+    if members != nil && len(members) != 0{
+        members = stringSet(members) // This avoids repeated members 
+        err := rclient.SetChatMember(chatid, members...)
+        if err != nil{
+            rgeoclient.RemoveChat(chatid)
+            rgeoclient.GeoRemoveChat(chatid)
+            return err
+        }
+        var rep pb.ReplicationMsg
+        rep.Meta = new(pb.Metadata)
+        rep.Meta.MsgMime = make(map[string]string)
+        rep.Meta.MsgMime["Content-Type"] = "text/plain"
+        rep.Meta.Resource = "/chat/"+chatid
+        rep.Msg = []byte(chat.Name)
+        sendMessageToChat(chatid,&rep)
+    }
+    return nil
+}
+
 func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     row, err := authenticateRequestPlusRow(r)
     if err != nil{
@@ -95,54 +129,121 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     var chat authpb.Chat
     err = json.NewDecoder(r.Body).Decode(&chat)
     if err != nil{
-        send400error(w,"Expected json format with keys: Name, IsOpen, IsPhysical, among others. All strings.")
+        send400error(w,"Expected json format with keys: Name, IsOpen, among others. All strings.")
         return
     }
     // filling up some fields; always overwrite this fields.
     chat.Creator = user
     chat.Creation =  ptypes.TimestampNow()
     chatid := createMsgId(loc+user, chat.Creation.Nanos, chat.Creation.Seconds)
-    members := chat.Members
-    chat.Members = nil
-    err = rclient.SetChat(chatid, &chat)
+    chat.Members = append(chat.Members,user)
+    chat.Resource = "/chat/"+chatid
+    if chat.More == nil{
+        chat.More = make(map[string]string)
+    }
+    if _, ok := chat.More["Created-At-Location"]; !ok{
+        chat.More["Created-At-Location"] = loc
+    }
+
+    err =  StoreAndForwardChat(chatid, &chat)
     if err != nil{
         log.Println(err, &chat)
         send500error(w)
         return
     }
-    if chat.IsOpen {
-        err = rgeoclient.GeoAddChat(loc, chatid)
+    w.Header().Add("Content-Type", "application/json")
+    out:= fmt.Sprintf("{ \"chatid\": \"%s\"}",chatid)
+    w.Write([]byte(out))
+}
+
+func StoreAndForwardEventAndChat(eventid string, event *authpb.Event, chat *authpb.Chat) error {
+    members := event.Members
+    event.Members = nil // TODO this changes the pointer of event.Memebers
+    err := rclient.SetEvent(eventid, event)
+    if event.IsOpen {
+        loc := event.More["Created-At-Location"]
+        err = rgeoclient.GeoAddEvent(loc, eventid)
         if err != nil{
-            log.Println(err, chatid)
-            rgeoclient.RemoveChat(chatid)
-            send500error(w)
-            return
+            rgeoclient.RemoveEvent(eventid)
+            return err
         }
+        // TODO Broadcast
     }
     if members != nil && len(members) != 0{
-        members = append(members,user)
-        members = stringSet(members)
-        err := rclient.SetChatMember(chatid, members...)
+        members = stringSet(members) // This avoids repeated members
+        err := rclient.SetEventMember(eventid, members...)
         if err != nil{
-            log.Println(err, chatid)
-            rgeoclient.RemoveChat(chatid)
-            send500error(w)
+            rgeoclient.RemoveEvent(eventid)
+            rgeoclient.GeoRemoveEvent(eventid)
+            return err
         }
         var rep pb.ReplicationMsg
         rep.Meta = new(pb.Metadata)
         rep.Meta.MsgMime = make(map[string]string)
         rep.Meta.MsgMime["Content-Type"] = "text/plain"
-        rep.Meta.Resource = "/chat/"+chatid
-        rep.Msg = []byte(chat.Name)
-        sendMessageToChat(chatid,&rep)
-        // avoid calling, because the poster user id might be repeated in members
-        // sendMessageToChatWithMembers(&rep, members)
+        rep.Meta.Resource = "/event/"+eventid
+        rep.Msg = []byte(event.Name)
+        sendMessageToChat(eventid,&rep)
     }
-    // Notify member -> this can be done in a queue to return faster this object
-    // Save this message in each member notification list. push and pop notifications.
-    // GetCuuid from Users -> send message to wsholder.
+    chat.Members = nil // TODO this changes the pointer of event.Memebers
+    StoreAndForwardChat("event:"+eventid, chat)
+    return nil
+}
+
+func CreateEventHandler(w http.ResponseWriter, r *http.Request) {
+    row, err := authenticateRequestPlusRow(r)
+    if err != nil{
+        send401Unauthorized(w,"Expected valid bearer token.")
+        return
+    }
+    loc := row["loc"]
+    user:= row["userid"]
+    var event authpb.Event
+    var chat authpb.Chat
+    bts, err := ioutil.ReadAll(r.Body)
+    reader := bytes.NewReader(bts)
+    err = json.NewDecoder(reader).Decode(&event)
+
+    if err != nil{
+        log.Print("err 1", err)
+        send400error(w,"Expected json format with keys: Name, IsOpen, among others. All strings.")
+        return
+    }
+    reader = bytes.NewReader(bts) // Rewind
+    err = json.NewDecoder(reader).Decode(&chat)
+    if err != nil{
+        log.Print("err 2", err)
+        send400error(w,"We tried though ")
+        return
+    }
+
+    // filling up some fields; always overwrite this fields.
+    event.Creation = ptypes.TimestampNow()
+    chat.Creation = event.Creation
+    event.Creator = user
+    chat.Creator = user
+
+    eventid := createMsgId(loc+user, event.Creation.Nanos, event.Creation.Seconds)
+    chatid := "event:"+eventid
+    event.Resource = "/event/"+eventid
+    chat.Resource = "/chat/"+chatid
+    chat.FromEvent = event.Resource
+    event.Chat = chat.Resource
+
+    if event.More == nil{
+        event.More = make(map[string]string)
+    }
+    if _, ok := event.More["Created-At-Location"]; !ok{
+        event.More["Created-At-Location"] = loc
+    }
+
+    if event.Members != nil {
+        event.Members = append(event.Members,user)
+        chat.Members = event.Members
+    }
+    err =  StoreAndForwardEventAndChat(eventid, &event, &chat)
     w.Header().Add("Content-Type", "application/json")
-    out:= fmt.Sprintf("{ \"chatid\": \"%s\"}",chatid)
+    out:= fmt.Sprintf("{ \"eventid\": \"%s\", \"chatid\": \"%s\"}",eventid,chatid)
     w.Write([]byte(out))
 }
 
@@ -186,12 +287,7 @@ func RetrieveGeoHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     c, err := rstore.RetrieveGeoMessages(context.TODO(), loc, tinit, tfin)
-    for {
-        msg, ok := <-c
-        if !ok{
-            // Channel closed
-            return
-        }
+    for msg:= range c{
         rawWrite(w,msg)
     }
 }
@@ -225,15 +321,8 @@ func RetrieveChatHandler (w http.ResponseWriter, r *http.Request) {
         return
     }
     c, err := rstore.RetrieveChatMessages(context.TODO(), retrv.Chatid, tinit, tfin)
-    count := 0
-    for true {
-        msg, ok := <-c
-        if !ok{ // Channel closed
-            return
-        }
+    for msg:= range c{
         rawWrite(w,msg)
-        log.Println("H",count)
-        count += 1
     }
 }
 
@@ -595,12 +684,12 @@ func main(){
     router.HandleFunc("/", HomeHandler)
     router.HandleFunc("/auth", AuthlocHandler)
 //    router.Handle("/writemsg", TimeRequest(http.HandlerFunc(WriteMsgHandler)))
-    router.HandleFunc("/writemsg", WriteMsgHandler)
+    router.HandleFunc("/writemsg", WriteMsgHandler) // GeoWriteMsg
     router.HandleFunc("/write/chat/{chatid}", WriteMsgChatHandler)
     router.HandleFunc("/create/chat", CreateChatHandler)
     router.HandleFunc("/retrieve/chat", RetrieveChatHandler)
     router.HandleFunc("/retrieve/geochat", RetrieveGeoHandler)
-//    router.HandleFunc("/create/event", CreateEventHandler)
+    router.HandleFunc("/create/event", CreateEventHandler)
 
     loggedRouter := handlers.LoggingHandler(os.Stdout, router)
 

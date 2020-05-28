@@ -12,6 +12,7 @@ message Chat {
     bool IsOpen = 2;
     string Description = 3;
     repeated string Tags = 4;
+    string Resource = 5;
     map<string,string> More = 6;
     repeated string Members = 8;
     google.protobuf.Timestamp Creation = 9;
@@ -25,6 +26,7 @@ message Event{
     bool IsOpen = 2;
     string Description = 3;
     repeated string Tags = 4;
+    string Resource = 5;
     map<string,string> More = 6;
     repeated string Members = 8;
     google.protobuf.Timestamp Creation = 9;

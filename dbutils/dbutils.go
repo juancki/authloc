@@ -41,7 +41,9 @@ func base64_2_string(b64 string) string {
 const(
     WORLD = "world"
     GEOCHAT = "chat"
+    GEOEVENT = "event"
     CHATMEMBER = "cm:"
+    EVENTMEMBER = "cm:"
     EVENT = "e:"
     CHAT = "c:"
     CHATSTORAGE = "cs:"
@@ -336,6 +338,48 @@ func (rclient *Redis) GetTokenFromUser(userid string) (string, error) {
     return rclient.Get(USER_TOKEN+userid)
 }
 
+func (rclient *Redis) RemoveEvent(eventid string) error{
+    rclient.Lock()
+    err := rclient.Redis.Del(EVENT+eventid).Err()
+    rclient.Unlock()
+    if err != nil{
+        return err
+    }
+    return nil
+}
+
+
+func (rgeoclient *Redis) GeoRemoveEvent(eventid string) error {
+    rgeoclient.Lock()
+    err := rgeoclient.Redis.ZRem(GEOEVENT,eventid).Err()
+    rgeoclient.Unlock()
+    return err
+}
+
+func (rgeoclient *Redis) GeoAddEvent(location string, eventid string) error{
+    long, lat := CoorFromString(location)
+    return rgeoclient.GeoAddEventCoor(long, lat, eventid)
+}
+
+func (rgeoclient *Redis) GeoUpdateEvent(location string, eventid string) error{
+    return rgeoclient.GeoAddEvent(location,eventid)
+}
+
+
+func (rgeoclient *Redis) GeoAddEventCoor(long float64, lat float64, eventid string) error{
+    loc := &redis.GeoLocation{}
+    loc.Latitude = lat
+    loc.Longitude = long
+    loc.Name = eventid
+
+    rgeoclient.Lock()
+    err := rgeoclient.Redis.GeoAdd(GEOEVENT,loc).Err()
+    rgeoclient.Unlock()
+    if err != nil{
+        return err
+    }
+    return nil
+}
 func (rclient *Redis) RemoveChat(chatid string) error{
     rclient.Lock()
     err := rclient.Redis.Del(CHAT+chatid).Err()
@@ -372,6 +416,13 @@ func (rclient *Redis) GetChat(chatid string) (*authpb.Chat, error) {
         return nil, err
     }
     return &chat, nil
+}
+
+func (rgeoclient *Redis) GeoRemoveChat(chatid string) error {
+    rgeoclient.Lock()
+    err := rgeoclient.Redis.ZRem(GEOCHAT,chatid).Err()
+    rgeoclient.Unlock()
+    return err
 }
 
 func (rgeoclient *Redis) GeoAddChat(location string, chatid string) error{
@@ -455,6 +506,86 @@ func (rclient *Redis) GetCuuidFromUserid(userids ...string) ([]cPool.Uuid, error
     return castMGetUseridToCuuid(result ,userids)
 }
 
+func (rclient *Redis) SetEventMember(eventid string, userid ...string) error {
+    // Creates a Sorted list of members in the event.
+    // To be make member in event operations faster
+    mem := make([]*redis.Z,len(userid))
+    for index, value := range userid{
+        mem[index] = &redis.Z{}
+        mem[index].Member = value
+    }
+    eventmemberkey := EVENTMEMBER + eventid
+    rclient.Lock()
+    err := rclient.Redis.ZAdd(eventmemberkey, mem...).Err()
+    rclient.Unlock()
+    if err != nil {
+        return err
+    }
+    return nil
+}
+
+
+func (rclient *Redis) RemoveEventMember(eventid string, userid string) error {
+    // Removes the memeber from the event
+    memb := &redis.Z{}
+    memb.Member = userid
+    eventmemberkey := EVENTMEMBER + eventid
+    rclient.Lock()
+    err := rclient.Redis.ZRem(eventmemberkey, memb).Err()
+    rclient.Unlock()
+    if err == redis.Nil{
+        return nil // userid was not in eventid
+    } else if err != nil {
+        return err // Sth occurred.
+    }
+    return nil
+}
+
+func (rclient *Redis) RemoveAllEventMembers(eventid string) error {
+    // Remove the event:member relationship, this removing all members from event.
+    eventmemberkey := EVENTMEMBER + eventid
+    rclient.Lock()
+    err := rclient.Redis.Del(eventmemberkey).Err()
+    rclient.Unlock()
+    if err == redis.Nil{
+        return nil // The event:member relationship does not exist for eventid.
+    }else if err != nil {
+        return err
+    }
+    return nil
+}
+
+func (rclient *Redis) GetEventMembers (eventid string) ([]string, error) {
+    // Returns all the members in the event.
+    eventmemberkey := EVENTMEMBER + eventid
+    rclient.Lock()
+    res := rclient.Redis.ZRange(eventmemberkey,0,-1)
+    rclient.Unlock()
+    err := res.Err()
+    if err != nil {
+        return nil, err
+    }
+    zmem, err := res.Result()
+    if err != nil {
+        return nil, err
+    }
+    return zmem, nil
+}
+
+func (rclient *Redis) CheckMemberInEvent(eventid string, member string) (bool, error) {
+    // Returns true if member is in event
+    eventmemberkey := EVENTMEMBER + eventid
+    rclient.Lock()
+    res := rclient.Redis.ZScore(eventmemberkey, member)
+    rclient.Unlock()
+    err := res.Err()
+    if err == redis.Nil { // redis.Nil -> redis key does not exist
+        return false, nil
+    }else if err != nil{
+        return false, err
+    }
+    return true, nil
+}
 func (rclient *Redis) SetChatMember(chatid string, userid ...string) error {
     // Creates a Sorted list of members in the chat.
     // To be make member in chat operations faster
@@ -551,24 +682,22 @@ func (rclient *Redis) SetEvent(eventid string, event *authpb.Event) error {
     return nil
 }
 
-func (rclient *Redis) GetEvent(eventid string) (*authpb.Event,error) {
-    // Fetch an event based on its key.
+func (rclient *Redis) GetEvent(eventid string) (*authpb.Event, error) {
+    var event authpb.Event
     rclient.Lock()
-    result := rclient.Redis.Get(EVENT+eventid)
+    lookup := rclient.Redis.Get(EVENT+eventid)
     rclient.Unlock()
-    if result.Err() != nil{
-        return nil, result.Err()
-    }
-    bts, err := result.Bytes()
+    err := lookup.Err()
     if err != nil{
         return nil, err
     }
-    event := new(authpb.Event)
-    err = proto.Unmarshal(bts, event)
+    bts, _ := lookup.Bytes()
+
+    err = proto.Unmarshal(bts, &event)
     if err != nil{
         return nil, err
     }
-    return event, nil
+    return &event, nil
 }
 
 func (rclient *Redis) Get(key string) (string,error){
