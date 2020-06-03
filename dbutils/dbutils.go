@@ -1,13 +1,15 @@
 package dbutils
 
 import (
+	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"math"
 
 	//	"encoding/binary"
-	"errors"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -19,6 +21,7 @@ import (
 	redis "github.com/go-redis/redis/v7"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
+	"github.com/mmcloughlin/geohash"
 
 	//        timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	authpb "github.com/juancki/authloc/pb"
@@ -56,11 +59,12 @@ const(
     GEOCHAT = "chat"
     GEOEVENT = "event"
     CHATMEMBER = "cm:"
-    EVENTMEMBER = "cm:"
+    EVENTMEMBER = "em:"
     EVENT = "e:"
     CHAT = "c:"
     CHATSTORAGE = "cs:"
     GEOSTORAGE = "gs:"
+    MSGQUAKE = "mq:"
     TOKEN_AUTH = "ta:"
     USER_CONN = "uc:"
     USER_TOKEN = "ut:"
@@ -173,6 +177,29 @@ func getTimeWindows(ctx context.Context, init time.Time, fin time.Time) <-chan s
         }
     }(in, out)
     return c
+}
+
+func createMsgId(strseed string,nanos int32,seconds int64) string{
+    // set message id
+    hasher := sha1.New()
+    hasher.Write([]byte(strseed))
+    buf := make([]byte,10)
+    binary.BigEndian.PutUint32(buf, uint32(nanos))
+    hasher.Write(buf)
+    msgid := base64.URLEncoding.EncodeToString(hasher.Sum(nil))[0:7]
+    return msgid
+}
+
+func MessageId(location string, hash string) string {
+    long,lat := CoorFromString(location)
+    geo := geohash.EncodeWithPrecision(lat,long,2)
+    tw := getTimeWindow(time.Now())
+    msgid := tw + ":" + geo + ":" + hash
+    return msgid
+}
+
+func TimeWindow(t time.Time) string {
+    return getTimeWindow(t)
 }
 
 func getTimeWindow(t time.Time) string {
@@ -326,6 +353,14 @@ func CoorFromString(str string) (float64,float64){
     long,_ := strconv.ParseFloat(ind[0],64)
     lat,_ := strconv.ParseFloat(ind[1],64)
     return long,lat
+}
+
+func LongLatFromString(str string) (float64, float64){
+    return CoorFromString(str)
+}
+
+func LongLatToString(long, lat float64) string {
+    return fmt.Sprintf("%.6f:%.6f",long,lat) // Six decimals gives a precision of 111.32 mm at the equator
 }
 
 

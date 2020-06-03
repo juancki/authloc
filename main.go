@@ -26,7 +26,6 @@ import (
 	authpb "github.com/juancki/authloc/pb"
 	pb "github.com/juancki/wsholder/pb"
 	_ "github.com/lib/pq"
-	geohash "github.com/mmcloughlin/geohash"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -372,18 +371,6 @@ func verifyAuth(Token string, cuuid string){
     // TODO
 }
 
-func createGeoMsgId(coorstr string,nanos int32,seconds int64) string{
-    long, lat := mydb.CoorFromString(coorstr)
-    hash := geohash.Encode(lat,long)[0:6]
-    // set message id
-    hasher := sha1.New()
-    hasher.Write([]byte(hash))
-    buf := make([]byte,10)
-    binary.BigEndian.PutUint32(buf, uint32(nanos))
-    hasher.Write(buf)
-    msgid := base64.URLEncoding.EncodeToString(hasher.Sum(nil))[0:7]
-    return hash+"/"+msgid
-}
 
 func createMsgId(strseed string,nanos int32,seconds int64) string{
     // set message id
@@ -500,6 +487,27 @@ func WriteMsgChatHandler(w http.ResponseWriter, r *http.Request) {
     rstore.StoreChatMessage(chatid,&s) // This is a best-effort basis. Otherwise a Q is req.
 }
 
+func EarthquakeMsgHandler(w http.ResponseWriter, r *http.Request) {
+    // We have to make sure that the user did not perform this before
+    vars := mux.Vars(r)
+    msgid, ok := vars["msgid"]
+    if !ok {
+        send400error(w,"Bad requests, this URL is /write/chat/[chat-id]")
+        return
+    }
+    row, err := authenticateRequestPlusRow(r)
+    if err != nil{
+        log.Println("Could not authenticate", err)
+        send401Unauthorized(w,"Could not authenticate")
+        return
+    }
+    err = rclient.AddEarhquakeToMsg(msgid, row["user"], row["loc"])
+    if err != nil{
+        log.Println(err, msgid)
+        send500error(w)
+    }
+}
+
 func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
     row, err := authenticateRequestPlusRow(r)
     if err != nil{
@@ -514,7 +522,8 @@ func WriteMsgHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     rep.Meta.Poster = row["userid"]
-    msgid := createGeoMsgId(row["loc"],rep.Meta.Arrived.Nanos,rep.Meta.Arrived.Seconds)
+    hash := createMsgId(row["loc"],rep.Meta.Arrived.Nanos,rep.Meta.Arrived.Seconds)
+    msgid := mydb.MessageId(row["loc"],hash)
     rep.Meta.Resource = "/geochat/"+msgid
     ids, err := rgeoclient.QueryNearNeighbourhsByCoor(row["loc"])
     if err != nil{

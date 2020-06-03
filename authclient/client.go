@@ -244,6 +244,7 @@ func authGet(token, url, bodyType string, body[]byte) (resp *http.Request, err e
     if err != nil {
         return nil, err
     }
+    get.Header.Set("Content-Type", bodyType)
     get.Header.Add("Authentication","bearer "+token)
     return get, nil
 }
